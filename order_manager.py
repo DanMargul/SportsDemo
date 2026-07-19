@@ -9,6 +9,29 @@ MINIMUM_PRICE_CENTS = 2
 MAXIMUM_PRICE_CENTS = 98
 
 
+def fill_price_cents(fill, fallback=None):
+    if fill.get("yes_price_dollars") is not None:
+        return round(float(fill["yes_price_dollars"]) * 100)
+    if fill.get("price_dollars") is not None:
+        return round(float(fill["price_dollars"]) * 100)
+    if fill.get("price") is not None:
+        return round(float(fill["price"]) * 100)
+    if fill.get("yes_price") is not None:
+        return int(fill["yes_price"])
+    return fallback
+
+
+def fill_direction(fill):
+    outcome = fill.get("outcome_side") or {
+        "bid": "yes", "ask": "no"}.get(fill.get("book_side"))
+    if outcome is not None:
+        return outcome, (1 if outcome == "yes" else -1)
+    sign = 1 if fill.get("side") == "yes" else -1
+    if fill.get("action") == "sell":
+        sign = -sign
+    return f"{fill.get('action')}/{fill.get('side')}", sign
+
+
 class OrderManager:
     def __init__(self, client, ticker, max_position, max_order_contracts,
                  dry_run=True):
@@ -18,6 +41,8 @@ class OrderManager:
         self.max_order_contracts = max_order_contracts
         self.dry_run = dry_run
         self.position = 0.0
+        self.session_cash_dollars = 0.0
+        self.fills = []
         self.resting = {"bid": None, "ask": None}
 
     def rejection_reason(self, book_side, price_cents, contracts):
@@ -96,3 +121,19 @@ class OrderManager:
     def cancel_all(self):
         self.cancel("bid")
         self.cancel("ask")
+
+    def apply_fill(self, fill):
+        contracts = float(fill.get("count_fp", fill.get("count", 0)) or 0)
+        outcome_label, sign = fill_direction(fill)
+        self.position += sign * contracts
+        resting_order = self.resting["bid" if sign > 0 else "ask"]
+        price_cents = fill_price_cents(
+            fill, fallback=resting_order[1] if resting_order else None)
+        if price_cents is not None:
+            self.session_cash_dollars -= (sign * (price_cents / 100.0)
+                                          * contracts)
+        self.fills.append({"ts": time.time(), "ticker": self.ticker,
+                           "outcome": outcome_label, "price_cents": price_cents,
+                           "contracts": contracts})
+        log.info("[%s] FILL %s x%s @ %sc -> position %+.0f", self.ticker,
+                 outcome_label, contracts, price_cents, self.position)

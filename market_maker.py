@@ -40,10 +40,13 @@ async def run(args):
                                  quote_size=args.size,
                                  max_inventory=args.max_inventory)
     volatility = quoting.EwmaVolatility()
-    feed = MarketDataFeed([args.ticker])
+    feed = MarketDataFeed([args.ticker], include_fills=args.live)
     feed.on_book_update.append(
         lambda book: book.mid_cents is not None
         and volatility.update(book.mid_cents / 100.0))
+    feed.on_fill.append(
+        lambda fill: manager.apply_fill(fill)
+        if fill.get("market_ticker") in (None, args.ticker) else None)
     feed_task = asyncio.create_task(feed.run())
 
     started_at = time.time()
@@ -65,9 +68,12 @@ async def run(args):
                 book, manager.position, volatility.sigma_per_sqrt_second(),
                 close_timestamp - now, config)
             manager.sync_quotes(quotes)
-            log.info("[%s] book %s/%s mid %sc | inv %+.0f | quotes %s",
-                     args.ticker, book.best_bid_cents, book.best_ask_cents,
-                     book.mid_cents, manager.position, quotes)
+            marked_pnl = (manager.session_cash_dollars
+                          + manager.position * book.mid_cents / 100.0)
+            log.info("[%s] book %s/%s mid %sc | inv %+.0f | pnl $%+.2f | "
+                     "quotes %s", args.ticker, book.best_bid_cents,
+                     book.best_ask_cents, book.mid_cents, manager.position,
+                     marked_pnl, quotes)
     finally:
         manager.cancel_all()
         feed.stop()
