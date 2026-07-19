@@ -58,6 +58,19 @@ def signed_headers(method: str, path: str) -> dict:
     return return_dict
 
 
+def parse_iso_timestamp(value) -> float:
+    if not value:
+        return 0.0
+    from datetime import datetime, timezone
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except ValueError:
+        return 0.0
+
+
 class KalshiClient:
     def __init__(self, timeout_seconds: float = 20.0,
                  min_request_interval_seconds: float = 0.1):
@@ -105,6 +118,11 @@ class KalshiClient:
         return self.request_json(method="GET",
                                  path=f"/markets/{ticker}/orderbook",
                                  params={"depth": depth})
+
+    def get_trades(self, ticker, limit=200):
+        return self.request_json(
+            method="GET", path="/markets/trades",
+            params={"ticker": ticker, "limit": limit}).get("trades", [])
 
     def get_balance(self):
         return self.request_json(method="GET",

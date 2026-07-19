@@ -1,5 +1,7 @@
+import kalshi
 from order_book import OrderBook
 from market_data_feed import MarketDataFeed
+from quoting import EwmaVolatility
 
 
 def test_order_book():
@@ -62,10 +64,34 @@ def test_feed_dispatch():
     print("PASS feed dispatch (delta before snapshot ignored, updates fire)")
 
 
+def test_ewma_volatility():
+    volatility = EwmaVolatility(half_life_seconds=60.0)
+    quiet = EwmaVolatility(half_life_seconds=60.0)
+    price = 0.50
+    for step in range(200):
+        price += (0.02 if step % 2 else -0.02)
+        volatility.update(price, timestamp=step)
+        quiet.update(0.50, timestamp=step)
+    assert volatility.sigma_per_sqrt_second() > quiet.sigma_per_sqrt_second()
+    assert quiet.sigma_per_sqrt_second() < 1e-3
+    print("PASS ewma volatility (choppy price > flat price)")
+
+
+def test_parse_iso_timestamp():
+    earlier = kalshi.parse_iso_timestamp("2026-07-18T22:00:00Z")
+    later = kalshi.parse_iso_timestamp("2026-07-18T22:05:00Z")
+    assert later > earlier and later - earlier == 300.0
+    assert kalshi.parse_iso_timestamp(None) == 0.0
+    assert kalshi.parse_iso_timestamp("garbage") == 0.0
+    print("PASS parse_iso_timestamp (ordering, missing, malformed)")
+
+
 def main():
     test_order_book()
     test_apply_delta()
     test_feed_dispatch()
+    test_ewma_volatility()
+    test_parse_iso_timestamp()
     print("\nall offline tests passed")
 
 
