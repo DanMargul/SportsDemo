@@ -1,5 +1,8 @@
+import time
+
 import kalshi
 import devig
+import quoting
 from order_book import OrderBook
 from market_data_feed import MarketDataFeed
 from quoting import EwmaVolatility, QuoteConfig, compute_quotes
@@ -140,6 +143,31 @@ def test_quoting():
     print("PASS quoting (bounds, external-fair shift, inventory skew, cutoff)")
 
 
+def test_dry_run_loop_step():
+    feed = MarketDataFeed(["T"])
+    config = quoting.QuoteConfig()
+    volatility = quoting.EwmaVolatility()
+    feed.on_book_update.append(
+        lambda book: book.mid_cents is not None
+        and volatility.update(book.mid_cents / 100.0))
+
+    feed.handle_message({"type": "orderbook_snapshot", "sid": 1, "seq": 1,
+                         "msg": {"market_ticker": "T",
+                                 "yes": [[40, 120]], "no": [[55, 60]]}})
+    book = feed.books["T"]
+    assert book.has_snapshot
+    close_timestamp = time.time() + 3600
+    quotes = compute_quotes(book, 0.0, volatility.sigma_per_sqrt_second(),
+                            close_timestamp - time.time(), config)
+    assert quotes.bid_cents is not None and quotes.ask_cents is not None
+    assert quotes.bid_cents < quotes.ask_cents
+
+    near_close = time.time() + 30
+    close_buffer_seconds = 60
+    assert time.time() > near_close - close_buffer_seconds
+    print("PASS dry-run loop step (snapshot -> quotes; close-buffer stop)")
+
+
 def main():
     test_order_book()
     test_apply_delta()
@@ -149,6 +177,7 @@ def main():
     test_devig()
     test_taking_edge()
     test_quoting()
+    test_dry_run_loop_step()
     print("\nall offline tests passed")
 
 
