@@ -1,7 +1,8 @@
 import kalshi
+import devig
 from order_book import OrderBook
 from market_data_feed import MarketDataFeed
-from quoting import EwmaVolatility
+from quoting import EwmaVolatility, QuoteConfig, compute_quotes
 
 
 def test_order_book():
@@ -86,12 +87,68 @@ def test_parse_iso_timestamp():
     print("PASS parse_iso_timestamp (ordering, missing, malformed)")
 
 
+def test_devig():
+    for method in ("multiplicative", "power"):
+        fair, overround = devig.remove_vig([-110, -110], method)
+        assert all(abs(probability - 0.5) < 1e-9 for probability in fair)
+        assert abs(overround - (2 * 110 / 210 - 1)) < 1e-9
+
+    multiplicative, _ = devig.remove_vig([-450, +350], "multiplicative")
+    power, _ = devig.remove_vig([-450, +350], "power")
+    assert abs(sum(power) - 1) < 1e-9
+    assert power[0] > multiplicative[0]
+
+    three_way, _ = devig.remove_vig([2.45, 3.30, 3.10], "power")
+    assert abs(sum(three_way) - 1) < 1e-9 and len(three_way) == 3
+
+    assert abs(devig.implied_probability(-110) - 110 / 210) < 1e-9
+    assert abs(devig.implied_probability(2.0) - 0.5) < 1e-9
+    assert abs(devig.implied_probability(0.42) - 0.42) < 1e-9
+    print("PASS devig (symmetric, longshot correction, 3-way, odds formats)")
+
+
+def test_taking_edge():
+    book = OrderBook.from_rest("T", {"orderbook": {
+        "yes": [[50, 100]], "no": [[47, 100]]}})
+    edges = devig.taking_edge_cents(0.56, book)
+    assert edges["buy YES"] > 0 and edges["buy NO"] < 0
+    flat = devig.taking_edge_cents(0.515, book)
+    assert flat["buy YES"] < 0 and flat["buy NO"] < 0
+    print("PASS taking edge (mispriced side positive, fair-in-book negative)")
+
+
+def test_quoting():
+    book = OrderBook.from_rest("T", {"orderbook": {
+        "yes": [[40, 120]], "no": [[55, 60]]}})
+    base = compute_quotes(book, 0, 2e-4, 3600, QuoteConfig())
+    assert base.bid_cents < base.ask_cents
+    assert 1 <= base.bid_cents and base.ask_cents <= 99
+    assert base.bid_cents <= book.best_ask_cents - 1
+    assert base.ask_cents >= book.best_bid_cents + 1
+
+    lifted = compute_quotes(book, 0, 2e-4, 3600, QuoteConfig(),
+                            external_fair_probability=0.60)
+    assert lifted.bid_cents > base.bid_cents
+    assert lifted.ask_cents > base.ask_cents
+
+    long_inventory = compute_quotes(book, 40, 2e-4, 3600, QuoteConfig())
+    flat_inventory = compute_quotes(book, 0, 2e-4, 3600, QuoteConfig())
+    assert long_inventory.bid_cents <= flat_inventory.bid_cents
+
+    at_cap = compute_quotes(book, 50, 2e-4, 3600, QuoteConfig())
+    assert at_cap.bid_cents is None and at_cap.ask_cents is not None
+    print("PASS quoting (bounds, external-fair shift, inventory skew, cutoff)")
+
+
 def main():
     test_order_book()
     test_apply_delta()
     test_feed_dispatch()
     test_ewma_volatility()
     test_parse_iso_timestamp()
+    test_devig()
+    test_taking_edge()
+    test_quoting()
     print("\nall offline tests passed")
 
 
