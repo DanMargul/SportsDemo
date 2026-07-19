@@ -11,6 +11,7 @@ from order_manager import OrderManager
 log = logging.getLogger("market_maker")
 
 CLOSE_BUFFER_SECONDS = 60
+FAIR_GAP_WARNING_CENTS = 15
 
 import collections
 _recent_log = collections.deque(maxlen=200)
@@ -55,6 +56,18 @@ async def run(args):
         log.info("writing dashboard state to %s (run: python dashboard.py "
                  "--state-file %s)", args.state_file, args.state_file)
 
+    fair_watch = None
+    fair_poller = None
+    if args.sgo_odd:
+        from sgo_fairvalue import SgoEventPoller
+        fair_poller = SgoEventPoller(args.sgo_event, poll_seconds=args.sgo_poll)
+        fair_watch = fair_poller.watch(args.sgo_odd, invert=args.sgo_invert,
+                                       strike_line=args.sgo_line)
+        fair_poller.refresh()
+        log.info("[%s] SGO fair: %.1fc YES (%s, line %s) -- %s", args.ticker,
+                 fair_watch.fair_probability * 100, fair_watch.source,
+                 fair_watch.consensus_line, fair_watch.market_name)
+
     config = quoting.QuoteConfig(risk_aversion=args.gamma,
                                  fill_intensity_decay=args.k,
                                  quote_size=args.size,
@@ -68,10 +81,14 @@ async def run(args):
         lambda fill: manager.apply_fill(fill)
         if fill.get("market_ticker") in (None, args.ticker) else None)
     feed_task = asyncio.create_task(feed.run())
+    poller_task = (asyncio.create_task(fair_poller.run())
+                   if fair_poller else None)
 
     started_at = time.time()
     hard_stop = (started_at + args.minutes * 60
                  if args.minutes else float("inf"))
+    fair_was_live = False
+    last_gap_warning = 0.0
     try:
         while time.time() < hard_stop:
             await asyncio.sleep(args.interval)
@@ -84,9 +101,29 @@ async def run(args):
             if not (book.has_snapshot and book.best_bid_cents is not None
                     and book.best_ask_cents is not None):
                 continue
+            external_fair = None
+            if fair_watch is not None:
+                external_fair = fair_watch.fresh_fair()
+                if external_fair is not None and not fair_was_live:
+                    log.info("[%s] SGO fair live: %.1fc YES", args.ticker,
+                             external_fair * 100)
+                    fair_was_live = True
+                elif external_fair is None and fair_was_live:
+                    log.warning("[%s] SGO fair STALE (age %.0fs); quoting "
+                                "book-only", args.ticker,
+                                fair_watch.age_seconds())
+                    fair_was_live = False
+            if (external_fair is not None and book.mid_cents is not None
+                    and abs(external_fair * 100 - book.mid_cents)
+                    > FAIR_GAP_WARNING_CENTS
+                    and now - last_gap_warning > 30):
+                last_gap_warning = now
+                log.warning("[%s] external fair %.1fc vs book mid %sc -- "
+                            "check oddID/side mapping", args.ticker,
+                            external_fair * 100, book.mid_cents)
             quotes = quoting.compute_quotes(
                 book, manager.position, volatility.sigma_per_sqrt_second(),
-                close_timestamp - now, config)
+                close_timestamp - now, config, external_fair)
             manager.sync_quotes(quotes)
             marked_pnl = (manager.session_cash_dollars
                           + manager.position * book.mid_cents / 100.0)
@@ -111,15 +148,27 @@ async def run(args):
                                 for side, order in manager.resting.items()},
                     "position": manager.position, "pnl_dollars": marked_pnl,
                     "fill_count": len(manager.fills),
+                    "fair_cents": (external_fair * 100
+                                   if external_fair is not None else None),
+                    "fair_age_seconds": (fair_watch.age_seconds()
+                                         if fair_watch
+                                         and fair_watch.fresh_fair() is not None
+                                         else None),
                     "log": recent_log_lines()})
     finally:
         manager.cancel_all()
+        if fair_poller is not None:
+            fair_poller.stop()
         feed.stop()
         feed_task.cancel()
-        try:
-            await feed_task
-        except (asyncio.CancelledError, Exception):
-            pass
+        for task in (feed_task, poller_task):
+            if task is None:
+                continue
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
 
 
 def main():
@@ -140,8 +189,20 @@ def main():
     parser.add_argument("--state-file", default=None, metavar="PATH",
                         help="write dashboard state here each tick "
                              "(then run dashboard.py against the same path)")
+    parser.add_argument("--sgo-event", default=None, metavar="EVENT_ID",
+                        help="SportsGameOdds eventID (see sgo_fairvalue.py)")
+    parser.add_argument("--sgo-odd", default=None, metavar="ODD_ID",
+                        help="SGO oddID whose side settles Kalshi YES")
+    parser.add_argument("--sgo-poll", type=float, default=10.0)
+    parser.add_argument("--sgo-line", default=None, metavar="STRIKE",
+                        help="Kalshi strike; fair computed at this exact line "
+                             "via bookmaker alternate lines")
+    parser.add_argument("--sgo-invert", action="store_true",
+                        help="use 1-p (the chosen odd settles Kalshi NO)")
     parser.add_argument("--env", choices=["prod", "demo"], default=None)
     args = parser.parse_args()
+    if bool(args.sgo_odd) != bool(args.sgo_event):
+        raise SystemExit("--sgo-event and --sgo-odd must be given together")
     if args.env:
         kalshi.environment = args.env
     if args.live:

@@ -200,7 +200,7 @@ def main():
     args = parser.parse_args()
     DashboardView(args.state_file, args.refresh)
     ui.run(host="127.0.0.1", port=args.port, reload=False, show=False,
-           title="kalshi mm", dark=True)
+           title="SportsCapital Demo", dark=True)
 
 
 if __name__ in {"__main__", "__mp_main__"}:

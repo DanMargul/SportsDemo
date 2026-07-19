@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import logging
 import os
+import statistics
 import time
 
 import requests
@@ -36,11 +37,13 @@ def events_in(payload) -> list:
 
 class SgoOddWatch:
     def __init__(self, event_id: str, odd_id: str,
-                 max_age_seconds: float = 45.0, invert: bool = False):
+                 max_age_seconds: float = 45.0, invert: bool = False,
+                 strike_line=None):
         self.event_id = event_id
         self.odd_id = odd_id
         self.max_age_seconds = max_age_seconds
         self.invert = invert
+        self.strike_line = float(strike_line) if strike_line is not None else None
         self.fair_probability = None
         self.consensus_line = None
         self.market_name = ""
@@ -62,6 +65,8 @@ class SgoOddWatch:
     def refresh(self):
         params = {"eventID": self.event_id, "oddID": self.odd_id,
                   "includeOpposingOdds": "true"}
+        if self.strike_line is not None:
+            params["includeAltLines"] = "true"
         events = events_in(sgo_get("/events", params))
         if not events:
             raise RuntimeError(f"event {self.event_id} not found")
@@ -89,6 +94,8 @@ class SgoOddWatch:
 
     def _fair_probability_from(self, odd: dict, event_odds: dict):
         opposing_odd = event_odds.get(odd.get("opposingOddID") or "", {})
+        if self.strike_line is not None:
+            return self._fair_at_strike(odd, opposing_odd)
         if (odd.get("fairOdds") is not None
                 and odd.get("fairOddsAvailable", True)):
             self.source = "fairOdds"
@@ -106,6 +113,50 @@ class SgoOddWatch:
                     self.odd_id)
         return None
 
+    def _fair_at_strike(self, odd: dict, opposing_odd: dict):
+        strike = self.strike_line
+        consensus_line = odd.get("fairOverUnder")
+        if (consensus_line is not None
+                and abs(float(consensus_line) - strike) < 1e-9
+                and odd.get("fairOdds") is not None
+                and odd.get("fairOddsAvailable", True)):
+            self.source = f"fairOdds@{consensus_line}"
+            self.consensus_line = consensus_line
+            return devig.implied_probability(odd["fairOdds"])
+        our_side = self._bookmaker_odds_at_strike(odd, strike)
+        opposing_side = self._bookmaker_odds_at_strike(opposing_odd, strike)
+        per_book_fairs = [
+            devig.remove_vig([our_side[bookmaker], opposing_side[bookmaker]],
+                             "power")[0][0]
+            for bookmaker in our_side if bookmaker in opposing_side]
+        if not per_book_fairs:
+            lines_seen = set()
+            for side in (odd, opposing_odd):
+                for quote in (side.get("byBookmaker") or {}).values():
+                    for candidate in [quote] + list(quote.get("altLines") or []):
+                        if candidate.get("overUnder") is not None:
+                            lines_seen.add(str(candidate["overUnder"]))
+            log.warning("no bookmaker offers line %g on %s (lines seen: %s)",
+                        strike, self.odd_id,
+                        ", ".join(sorted(lines_seen)) or "none")
+            return None
+        self.source = f"altLines@{strike:g} ({len(per_book_fairs)} books)"
+        self.consensus_line = f"{strike:g}"
+        return statistics.median(per_book_fairs)
+
+    @staticmethod
+    def _bookmaker_odds_at_strike(odd: dict, strike: float) -> dict:
+        odds_by_bookmaker = {}
+        for bookmaker, quote in (odd.get("byBookmaker") or {}).items():
+            for candidate in [quote] + list(quote.get("altLines") or []):
+                candidate_line = candidate.get("overUnder")
+                if (candidate_line is not None and candidate.get("available")
+                        and candidate.get("odds") is not None
+                        and abs(float(candidate_line) - strike) < 1e-9):
+                    odds_by_bookmaker[bookmaker] = candidate["odds"]
+                    break
+        return odds_by_bookmaker
+
 
 class SgoEventPoller:
     def __init__(self, event_id: str, poll_seconds: float = 10.0):
@@ -114,10 +165,11 @@ class SgoEventPoller:
         self.watchers = []
         self._stop_requested = asyncio.Event()
 
-    def watch(self, odd_id: str, invert: bool = False,
+    def watch(self, odd_id: str, strike_line=None, invert: bool = False,
               max_age_seconds: float = 45.0) -> SgoOddWatch:
         watcher = SgoOddWatch(self.event_id, odd_id,
-                              max_age_seconds=max_age_seconds, invert=invert)
+                              max_age_seconds=max_age_seconds, invert=invert,
+                              strike_line=strike_line)
         self.watchers.append(watcher)
         return watcher
 
@@ -176,7 +228,8 @@ def list_odds(args):
 
 
 def watch_odd(args):
-    watcher = SgoOddWatch(args.event_id, args.odd_id, invert=args.invert)
+    watcher = SgoOddWatch(args.event_id, args.odd_id, invert=args.invert,
+                          strike_line=args.line)
     while True:
         watcher.refresh()
         print(f"{time.strftime('%H:%M:%S')}  "
@@ -206,6 +259,8 @@ def main():
     watch_parser.add_argument("event_id")
     watch_parser.add_argument("odd_id")
     watch_parser.add_argument("--poll", type=float, default=10.0)
+    watch_parser.add_argument("--line", default=None,
+                              help="fair at this exact strike via alt lines")
     watch_parser.add_argument("--invert", action="store_true",
                               help="use 1-p (the odd settles Kalshi NO)")
     args = parser.parse_args()
