@@ -1,11 +1,12 @@
 import json
+import os
+import tempfile
 import time
-import urllib.request
 
 import kalshi
 import devig
 import quoting
-import dashboard
+from dashboard_state import write_state, read_state
 from order_book import OrderBook
 from market_data_feed import MarketDataFeed
 from order_manager import OrderManager, fill_price_cents, fill_direction
@@ -278,27 +279,28 @@ def test_fill_updates_position_from_resting():
     print("PASS fill fallback price (uses resting order when absent)")
 
 
-def test_dashboard_roundtrip():
-    server = dashboard.start(8994)
+def test_dashboard_state_roundtrip():
     book = OrderBook.from_rest("T1", {"orderbook": {
         "yes": [[42, 50]], "no": [[55, 40]]}})
-    dashboard.push(
-        ticker="T1", env="prod", live=False, ts=time.time(),
-        stop_ts=time.time() + 600, mid_cents=book.mid_cents,
-        microprice_cents=book.microprice_cents, spread_cents=book.spread_cents,
-        book={"bids": [[42, 50]], "asks": [[45, 40]]},
-        resting={"bid": [41, 3], "ask": None}, position=2,
-        pnl_dollars=0.04, fill_count=1)
-    state = json.loads(urllib.request.urlopen(
-        "http://127.0.0.1:8994/state").read())
-    assert state["ticker"] == "T1" and state["spread_cents"] == 3
-    assert state["resting"]["bid"] == [41, 3]
-    assert len(state["mid_history"]) == 1
-    assert "served_at" in state
-    page = urllib.request.urlopen("http://127.0.0.1:8994/").read().decode()
-    assert "YOU" in page and "kalshi mm" in page
-    server.shutdown()
-    print("PASS dashboard (state round-trip, mid history, page served)")
+    directory = tempfile.mkdtemp()
+    path = os.path.join(directory, "state.json")
+    assert read_state(path) is None
+    snapshot = {
+        "ticker": "T1", "env": "prod", "live": False, "ts": time.time(),
+        "stop_ts": time.time() + 600, "mid_cents": book.mid_cents,
+        "microprice_cents": book.microprice_cents,
+        "spread_cents": book.spread_cents,
+        "book": {"bids": [[42, 50]], "asks": [[45, 40]]},
+        "resting": {"bid": [41, 3], "ask": None}, "position": 2,
+        "pnl_dollars": 0.04, "fill_count": 1, "log": ["hello"]}
+    write_state(path, snapshot)
+    loaded = read_state(path)
+    assert loaded["ticker"] == "T1" and loaded["spread_cents"] == 3
+    assert loaded["resting"]["bid"] == [41, 3]
+    write_state(path, {**snapshot, "position": 9})
+    assert read_state(path)["position"] == 9
+    assert not any(name.endswith(".tmp") for name in os.listdir(directory))
+    print("PASS dashboard state (atomic write, read, overwrite, no temp leak)")
 
 
 def main():
@@ -317,7 +319,7 @@ def main():
     test_fill_accounting()
     test_fill_helpers()
     test_fill_updates_position_from_resting()
-    test_dashboard_roundtrip()
+    test_dashboard_state_roundtrip()
     print("\nall offline tests passed")
 
 

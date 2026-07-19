@@ -12,6 +12,20 @@ log = logging.getLogger("market_maker")
 
 CLOSE_BUFFER_SECONDS = 60
 
+import collections
+_recent_log = collections.deque(maxlen=200)
+
+
+class _LogCapture(logging.Handler):
+    def emit(self, record):
+        _recent_log.append(
+            time.strftime("%H:%M:%S", time.localtime(record.created))
+            + f"  {record.levelname:<7} {record.getMessage()}")
+
+
+def recent_log_lines():
+    return list(_recent_log)
+
 
 async def run(args):
     if args.env:
@@ -35,10 +49,11 @@ async def run(args):
         log.info("[%s] starting position: %+.0f", args.ticker,
                  manager.position)
 
-    if args.dashboard:
-        import dashboard
-        dashboard.start(args.dashboard)
-        log.info("dashboard: http://127.0.0.1:%d", args.dashboard)
+    if args.state_file:
+        from dashboard_state import write_state
+        logging.getLogger().addHandler(_LogCapture())
+        log.info("writing dashboard state to %s (run: python dashboard.py "
+                 "--state-file %s)", args.state_file, args.state_file)
 
     config = quoting.QuoteConfig(risk_aversion=args.gamma,
                                  fill_intensity_decay=args.k,
@@ -79,22 +94,24 @@ async def run(args):
                      "quotes %s", args.ticker, book.best_bid_cents,
                      book.best_ask_cents, book.mid_cents, manager.position,
                      marked_pnl, quotes)
-            if args.dashboard:
-                dashboard.push(
-                    ticker=args.ticker, env=kalshi.environment, live=args.live,
-                    ts=now, stop_ts=close_timestamp - CLOSE_BUFFER_SECONDS,
-                    mid_cents=book.mid_cents,
-                    microprice_cents=book.microprice_cents,
-                    spread_cents=book.spread_cents,
-                    book={"bids": sorted(book.yes_bids.items(),
-                                         key=lambda level: -level[0])[:8],
-                          "asks": sorted((100 - no_price, quantity)
-                                         for no_price, quantity
-                                         in book.no_bids.items())[:8]},
-                    resting={side: (list(order[1:]) if order else None)
-                             for side, order in manager.resting.items()},
-                    position=manager.position, pnl_dollars=marked_pnl,
-                    fill_count=len(manager.fills))
+            if args.state_file:
+                write_state(args.state_file, {
+                    "ticker": args.ticker, "env": kalshi.environment,
+                    "live": args.live, "ts": now,
+                    "stop_ts": close_timestamp - CLOSE_BUFFER_SECONDS,
+                    "mid_cents": book.mid_cents,
+                    "microprice_cents": book.microprice_cents,
+                    "spread_cents": book.spread_cents,
+                    "book": {"bids": sorted(book.yes_bids.items(),
+                                            key=lambda level: -level[0])[:8],
+                             "asks": sorted((100 - no_price, quantity)
+                                            for no_price, quantity
+                                            in book.no_bids.items())[:8]},
+                    "resting": {side: (list(order[1:]) if order else None)
+                                for side, order in manager.resting.items()},
+                    "position": manager.position, "pnl_dollars": marked_pnl,
+                    "fill_count": len(manager.fills),
+                    "log": recent_log_lines()})
     finally:
         manager.cancel_all()
         feed.stop()
@@ -120,8 +137,9 @@ def main():
     parser.add_argument("--max-inventory", type=int, default=50)
     parser.add_argument("--gamma", type=float, default=0.3)
     parser.add_argument("--k", type=float, default=50.0)
-    parser.add_argument("--dashboard", type=int, nargs="?", const=8787,
-                        default=None, metavar="PORT")
+    parser.add_argument("--state-file", default=None, metavar="PATH",
+                        help="write dashboard state here each tick "
+                             "(then run dashboard.py against the same path)")
     parser.add_argument("--env", choices=["prod", "demo"], default=None)
     args = parser.parse_args()
     if args.env:
