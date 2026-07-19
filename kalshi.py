@@ -128,3 +128,32 @@ class KalshiClient:
         return self.request_json(method="GET",
                                  path="/portfolio/balance",
                                  signed=True)
+
+    def get_position(self, ticker) -> float:
+        payload = self.request_json(method="GET",
+                                    path="/portfolio/positions",
+                                    params={"ticker": ticker}, signed=True)
+        for market_position in payload.get("market_positions", []):
+            if market_position.get("ticker") == ticker:
+                return float(market_position.get("position", 0))
+        return 0.0
+
+    def create_order(self, *, ticker, book_side, contracts, price_cents,
+                     client_order_id):
+        body = {"ticker": ticker,
+                "side": book_side,
+                "count": str(int(contracts)),
+                "price": f"{price_cents / 100:.2f}",
+                "client_order_id": client_order_id,
+                "time_in_force": "good_till_canceled",
+                "self_trade_prevention_type": "taker_at_cross",
+                "post_only": True,
+                "cancel_order_on_pause": True}
+        return self.request_json(method="POST",
+                                 path="/portfolio/events/orders",
+                                 body=body, signed=True)
+
+    def cancel_order(self, order_id):
+        return self.request_json(method="DELETE",
+                                 path=f"/portfolio/events/orders/{order_id}",
+                                 signed=True)

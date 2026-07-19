@@ -5,7 +5,8 @@ import devig
 import quoting
 from order_book import OrderBook
 from market_data_feed import MarketDataFeed
-from quoting import EwmaVolatility, QuoteConfig, compute_quotes
+from order_manager import OrderManager
+from quoting import EwmaVolatility, QuotePair, QuoteConfig, compute_quotes
 
 
 def test_order_book():
@@ -168,6 +169,73 @@ def test_dry_run_loop_step():
     print("PASS dry-run loop step (snapshot -> quotes; close-buffer stop)")
 
 
+class FakeClient:
+    def __init__(self):
+        self.calls = []
+
+    def create_order(self, **kwargs):
+        self.calls.append(("create", kwargs))
+        return {"order_id": f"ord{len(self.calls)}"}
+
+    def cancel_order(self, order_id):
+        self.calls.append(("cancel", order_id))
+
+
+def test_order_request_body():
+    captured = {}
+    client = kalshi.KalshiClient()
+    client.request_json = (lambda method, path, params=None, body=None,
+                           signed=False: captured.update(
+                               method=method, path=path, body=body)
+                           or {"order_id": "x"})
+    client.create_order(ticker="T", book_side="ask", contracts=1,
+                        price_cents=57, client_order_id="cid")
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/portfolio/events/orders"
+    assert captured["body"]["side"] == "ask"
+    assert captured["body"]["price"] == "0.57"
+    assert captured["body"]["count"] == "1"
+    assert captured["body"]["time_in_force"] == "good_till_canceled"
+    assert captured["body"]["self_trade_prevention_type"] == "taker_at_cross"
+    assert captured["body"]["post_only"] is True
+    client.cancel_order("abc")
+    assert captured["path"] == "/portfolio/events/orders/abc"
+    print("PASS order request body (V2 endpoint, YES-price both sides)")
+
+
+def test_order_manager():
+    client = FakeClient()
+    manager = OrderManager(client, "T", max_position=30,
+                           max_order_contracts=20, dry_run=False)
+    manager.sync_quotes(QuotePair(41, 10, 46, 10))
+    created = [kwargs for op, kwargs in client.calls if op == "create"]
+    assert [order["book_side"] for order in created] == ["bid", "ask"]
+    assert created[0]["price_cents"] == 41 and created[1]["price_cents"] == 46
+
+    manager.sync_quotes(QuotePair(42, 10, 45, 10))
+    assert manager.resting["bid"][1] == 41 and manager.resting["ask"][1] == 46
+
+    manager.sync_quotes(QuotePair(44, 10, 48, 10))
+    assert manager.resting["bid"][1] == 44 and manager.resting["ask"][1] == 48
+
+    manager.position = 25
+    manager.sync_quotes(QuotePair(44, 10, 48, 10))
+    assert manager.resting["bid"] is None and manager.resting["ask"] is not None
+
+    manager.cancel_all()
+    assert manager.resting == {"bid": None, "ask": None}
+    print("PASS order manager (reprice band, veto pulls quote, cancel-all)")
+
+
+def test_dry_run_places_nothing():
+    client = FakeClient()
+    manager = OrderManager(client, "T", 30, 20, dry_run=True)
+    manager.sync_quotes(QuotePair(41, 10, 46, 10))
+    assert client.calls == []
+    assert manager.resting["bid"][0] == "dry"
+    print("PASS dry-run (no client calls, resting tracked locally)")
+
+
 def main():
     test_order_book()
     test_apply_delta()
@@ -178,6 +246,9 @@ def main():
     test_taking_edge()
     test_quoting()
     test_dry_run_loop_step()
+    test_order_request_body()
+    test_order_manager()
+    test_dry_run_places_nothing()
     print("\nall offline tests passed")
 
 

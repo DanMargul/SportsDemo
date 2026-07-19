@@ -6,6 +6,7 @@ import time
 import kalshi
 import quoting
 from market_data_feed import MarketDataFeed
+from order_manager import OrderManager
 
 log = logging.getLogger("market_maker")
 
@@ -27,6 +28,13 @@ async def run(args):
     log.info("[%s] status %s | closes %s", args.ticker,
              market.get("status"), market.get("close_time"))
 
+    manager = OrderManager(client, args.ticker, args.max_inventory, args.size,
+                           dry_run=not args.live)
+    if args.live:
+        manager.position = client.get_position(args.ticker)
+        log.info("[%s] starting position: %+.0f", args.ticker,
+                 manager.position)
+
     config = quoting.QuoteConfig(risk_aversion=args.gamma,
                                  fill_intensity_decay=args.k,
                                  quote_size=args.size,
@@ -41,27 +49,27 @@ async def run(args):
     started_at = time.time()
     hard_stop = (started_at + args.minutes * 60
                  if args.minutes else float("inf"))
-    inventory = 0.0
     try:
         while time.time() < hard_stop:
             await asyncio.sleep(args.interval)
             now = time.time()
             if now > close_timestamp - CLOSE_BUFFER_SECONDS:
-                log.info("[%s] close buffer reached; stopping", args.ticker)
+                log.info("[%s] close buffer reached; pulling quotes", args.ticker)
+                manager.sync_quotes(None)
                 break
             book = feed.books[args.ticker]
             if not (book.has_snapshot and book.best_bid_cents is not None
                     and book.best_ask_cents is not None):
                 continue
             quotes = quoting.compute_quotes(
-                book, inventory, volatility.sigma_per_sqrt_second(),
+                book, manager.position, volatility.sigma_per_sqrt_second(),
                 close_timestamp - now, config)
-            log.info("[%s] book %s/%s mid %sc | sigma_day %.3f | quotes %s",
+            manager.sync_quotes(quotes)
+            log.info("[%s] book %s/%s mid %sc | inv %+.0f | quotes %s",
                      args.ticker, book.best_bid_cents, book.best_ask_cents,
-                     book.mid_cents,
-                     volatility.sigma_per_sqrt_second() * (86400 ** 0.5),
-                     quotes)
+                     book.mid_cents, manager.position, quotes)
     finally:
+        manager.cancel_all()
         feed.stop()
         feed_task.cancel()
         try:
@@ -74,10 +82,11 @@ def main():
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)-7s %(message)s")
     parser = argparse.ArgumentParser(
-        description="Dry-run Avellaneda-Stoikov quote loop for one Kalshi "
-                    "market: streams the book, computes quotes, logs them. "
-                    "Places no orders.")
+        description="Avellaneda-Stoikov market maker for one Kalshi market. "
+                    "Dry-run by default; --live places real post-only "
+                    "orders after a typed confirmation.")
     parser.add_argument("ticker")
+    parser.add_argument("--live", action="store_true")
     parser.add_argument("--minutes", type=float, default=None)
     parser.add_argument("--interval", type=float, default=1.0)
     parser.add_argument("--size", type=int, default=10)
@@ -86,6 +95,13 @@ def main():
     parser.add_argument("--k", type=float, default=50.0)
     parser.add_argument("--env", choices=["prod", "demo"], default=None)
     args = parser.parse_args()
+    if args.env:
+        kalshi.environment = args.env
+    if args.live:
+        typed = input(f"LIVE orders on {kalshi.environment.upper()} with real "
+                      f"money. Type '{args.ticker}' to confirm: ")
+        if typed.strip() != args.ticker:
+            raise SystemExit("aborted")
     asyncio.run(run(args))
 
 
