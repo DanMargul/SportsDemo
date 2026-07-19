@@ -35,6 +35,11 @@ async def run(args):
         log.info("[%s] starting position: %+.0f", args.ticker,
                  manager.position)
 
+    if args.dashboard:
+        import dashboard
+        dashboard.start(args.dashboard)
+        log.info("dashboard: http://127.0.0.1:%d", args.dashboard)
+
     config = quoting.QuoteConfig(risk_aversion=args.gamma,
                                  fill_intensity_decay=args.k,
                                  quote_size=args.size,
@@ -74,6 +79,22 @@ async def run(args):
                      "quotes %s", args.ticker, book.best_bid_cents,
                      book.best_ask_cents, book.mid_cents, manager.position,
                      marked_pnl, quotes)
+            if args.dashboard:
+                dashboard.push(
+                    ticker=args.ticker, env=kalshi.environment, live=args.live,
+                    ts=now, stop_ts=close_timestamp - CLOSE_BUFFER_SECONDS,
+                    mid_cents=book.mid_cents,
+                    microprice_cents=book.microprice_cents,
+                    spread_cents=book.spread_cents,
+                    book={"bids": sorted(book.yes_bids.items(),
+                                         key=lambda level: -level[0])[:8],
+                          "asks": sorted((100 - no_price, quantity)
+                                         for no_price, quantity
+                                         in book.no_bids.items())[:8]},
+                    resting={side: (list(order[1:]) if order else None)
+                             for side, order in manager.resting.items()},
+                    position=manager.position, pnl_dollars=marked_pnl,
+                    fill_count=len(manager.fills))
     finally:
         manager.cancel_all()
         feed.stop()
@@ -99,6 +120,8 @@ def main():
     parser.add_argument("--max-inventory", type=int, default=50)
     parser.add_argument("--gamma", type=float, default=0.3)
     parser.add_argument("--k", type=float, default=50.0)
+    parser.add_argument("--dashboard", type=int, nargs="?", const=8787,
+                        default=None, metavar="PORT")
     parser.add_argument("--env", choices=["prod", "demo"], default=None)
     args = parser.parse_args()
     if args.env:

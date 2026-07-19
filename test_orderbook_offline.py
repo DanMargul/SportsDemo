@@ -1,8 +1,11 @@
+import json
 import time
+import urllib.request
 
 import kalshi
 import devig
 import quoting
+import dashboard
 from order_book import OrderBook
 from market_data_feed import MarketDataFeed
 from order_manager import OrderManager, fill_price_cents, fill_direction
@@ -275,6 +278,29 @@ def test_fill_updates_position_from_resting():
     print("PASS fill fallback price (uses resting order when absent)")
 
 
+def test_dashboard_roundtrip():
+    server = dashboard.start(8994)
+    book = OrderBook.from_rest("T1", {"orderbook": {
+        "yes": [[42, 50]], "no": [[55, 40]]}})
+    dashboard.push(
+        ticker="T1", env="prod", live=False, ts=time.time(),
+        stop_ts=time.time() + 600, mid_cents=book.mid_cents,
+        microprice_cents=book.microprice_cents, spread_cents=book.spread_cents,
+        book={"bids": [[42, 50]], "asks": [[45, 40]]},
+        resting={"bid": [41, 3], "ask": None}, position=2,
+        pnl_dollars=0.04, fill_count=1)
+    state = json.loads(urllib.request.urlopen(
+        "http://127.0.0.1:8994/state").read())
+    assert state["ticker"] == "T1" and state["spread_cents"] == 3
+    assert state["resting"]["bid"] == [41, 3]
+    assert len(state["mid_history"]) == 1
+    assert "served_at" in state
+    page = urllib.request.urlopen("http://127.0.0.1:8994/").read().decode()
+    assert "YOU" in page and "kalshi mm" in page
+    server.shutdown()
+    print("PASS dashboard (state round-trip, mid history, page served)")
+
+
 def main():
     test_order_book()
     test_apply_delta()
@@ -291,6 +317,7 @@ def main():
     test_fill_accounting()
     test_fill_helpers()
     test_fill_updates_position_from_resting()
+    test_dashboard_roundtrip()
     print("\nall offline tests passed")
 
 
