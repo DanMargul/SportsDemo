@@ -97,6 +97,12 @@ class KalshiClient:
         return self.request_json(method="GET",
                                  path=f"/markets/{ticker}")
 
+    def get_orderbook(self, ticker, depth=50):
+        return self.request_json(method="GET",
+                                 path=f"/markets/{ticker}/orderbook",
+                                 params={"depth": depth})
+
+
     def get_balance(self):
         return self.request_json(method="GET",
                                  path="/portfolio/balance",

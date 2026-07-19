@@ -1,25 +1,27 @@
 import sys
 
 import kalshi
+from order_book import OrderBook
 
 
 def main():
 
-    start_client = kalshi.KalshiClient()
-    print(f"Status: {start_client.get_exchange_status()}\n")
+    if len(sys.argv) < 2:
+        print("usage: python first_kalshi_test.py TICKER")
+        return
+    ticker = sys.argv[1]
+    client = kalshi.KalshiClient()
+    print(f"exchange status: {client.get_exchange_status().get("trading_active")}")
 
-    if len(sys.argv) > 1:
-        market_response = start_client.get_market(sys.argv[1])
-        market_info = market_response.get("market", {})
-        print(f"{market_info.get('ticker')}")
-        print(f"Title:              {market_info.get('title')}")
-        print(f"Yes Bid/Yes Ask:    ${market_info.get('yes_bid_dollars')}  / ${market_info.get('yes_ask_dollars')}")
-        print(f"Closing:            {market_info.get('close_time')}")
+    market = client.get_market(ticker)
+    print(f"{market.get('ticker')}: {market.get('title')} | "
+          f"status {market.get('status')} | closes {market.get('close_time')}")
 
-    try:
-        print(f"Balance: {start_client.get_balance()}")
-    except RuntimeError as runtime_error:
-        print(f"Balance Not Returned: {runtime_error}")
+    book = OrderBook.from_rest(ticker, client.get_orderbook(ticker))
+    print(book.ladder_str())
+    print(f"mid {book.mid_cents}c  microprice "
+          f"{book.microprice_cents and round(book.microprice_cents, 2)}c  "
+          f"spread {book.spread_cents}c")
 
 
 
