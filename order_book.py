@@ -39,6 +39,23 @@ class OrderBook:
         self.no_bids = parse_price_levels(message, "no")
         self.has_snapshot = True
 
+    def apply_delta(self, message: dict) -> None:
+        if message.get("price_dollars") is not None:
+            dollars = float(message["price_dollars"])
+            cents = round(dollars * 100)
+            if abs(dollars * 100 - cents) > 1e-6:
+                return
+            price_cents = cents
+        else:
+            price_cents = int(message.get("price", 0))
+        quantity_delta = float(message.get("delta_fp", message.get("delta", 0)))
+        side_levels = self.yes_bids if message.get("side") == "yes" else self.no_bids
+        new_quantity = side_levels.get(price_cents, 0.0) + quantity_delta
+        if new_quantity <= 1e-9:
+            side_levels.pop(price_cents, None)
+        else:
+            side_levels[price_cents] = new_quantity
+
     @property
     def best_bid_cents(self):
         if not self.yes_bids:

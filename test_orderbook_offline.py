@@ -1,4 +1,5 @@
 from order_book import OrderBook
+from market_data_feed import MarketDataFeed
 
 
 def test_order_book():
@@ -28,8 +29,43 @@ def test_order_book():
     print("PASS order book (whole-cent, fixed-point, off-cent guard, microprice)")
 
 
+def test_apply_delta():
+    book = OrderBook.from_rest("T", {"orderbook": {
+        "yes": [[41, 10], [42, 13]], "no": [[45, 20], [56, 17]]}})
+    book.apply_delta({"side": "yes", "price": 42, "delta": -13})
+    assert book.best_bid_cents == 41
+    book.apply_delta({"side": "yes", "price": 43, "delta": 5})
+    assert book.best_bid_cents == 43 and book.yes_bids[43] == 5
+    book.apply_delta({"side": "no", "price_dollars": "0.57", "delta_fp": "8.00"})
+    assert book.best_ask_cents == 43
+    book.apply_delta({"side": "no", "price_dollars": "0.575", "delta_fp": "9.00"})
+    assert 42.5 not in book.no_bids
+    print("PASS apply_delta (add, remove, fixed-point, off-cent guard)")
+
+
+def test_feed_dispatch():
+    feed = MarketDataFeed(["T"])
+    updates = []
+    feed.on_book_update.append(lambda book: updates.append(book.best_bid_cents))
+    feed.handle_message({"type": "orderbook_delta", "sid": 1, "seq": 1,
+                         "msg": {"market_ticker": "T", "side": "yes",
+                                 "price": 40, "delta": 100}})
+    assert updates == []
+    feed.handle_message({"type": "orderbook_snapshot", "sid": 1, "seq": 2,
+                         "msg": {"market_ticker": "T",
+                                 "yes": [[40, 50]], "no": [[57, 30]]}})
+    feed.handle_message({"type": "orderbook_delta", "sid": 1, "seq": 3,
+                         "msg": {"market_ticker": "T", "side": "yes",
+                                 "price": 41, "delta": 20}})
+    assert updates == [40, 41]
+    assert feed.books["T"].best_bid_cents == 41
+    print("PASS feed dispatch (delta before snapshot ignored, updates fire)")
+
+
 def main():
     test_order_book()
+    test_apply_delta()
+    test_feed_dispatch()
     print("\nall offline tests passed")
 
 

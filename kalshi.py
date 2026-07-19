@@ -10,6 +10,10 @@ kalshi_api_root = "/trade-api/v2"
 rest_api_url = {
     "demo": "https://demo-api.kalshi.co",
     "prod": "https://api.elections.kalshi.com"}
+websocket_url = {
+    "demo": "wss://demo-api.kalshi.co/trade-api/ws/v2",
+    "prod": "wss://api.elections.kalshi.com/trade-api/ws/v2"}
+websocket_sign_path = "/trade-api/ws/v2"
 
 access_key_id = os.environ.get(key="KALSHI_API_KEY_ID")
 private_key_path = os.environ.get(key="KALSHI_PRIVATE_KEY_PATH")
@@ -95,13 +99,12 @@ class KalshiClient:
 
     def get_market(self, ticker: str):
         return self.request_json(method="GET",
-                                 path=f"/markets/{ticker}")
+                                 path=f"/markets/{ticker}").get("market", {})
 
     def get_orderbook(self, ticker, depth=50):
         return self.request_json(method="GET",
                                  path=f"/markets/{ticker}/orderbook",
                                  params={"depth": depth})
-
 
     def get_balance(self):
         return self.request_json(method="GET",
