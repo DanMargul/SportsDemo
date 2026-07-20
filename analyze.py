@@ -3,7 +3,7 @@ import math
 
 import kalshi
 from order_book import OrderBook
-from quoting import EwmaVolatility
+from quoting import VolatilityEWMA
 
 
 def trade_price_cents(trade):
@@ -29,7 +29,7 @@ def main():
     trades = sorted(client.get_trades(args.ticker, limit=200),
                     key=lambda trade: kalshi.parse_iso_timestamp(
                         trade.get("created_time")))
-    volatility = EwmaVolatility()
+    volatility = VolatilityEWMA()
     total_volume = signed_flow = 0.0
     for trade in trades:
         price_cents = trade_price_cents(trade)

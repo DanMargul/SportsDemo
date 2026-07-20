@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 
-class EwmaVolatility:
+class VolatilityEWMA:
     def __init__(self, half_life_seconds: float = 300.0,
                  initial_sigma: float = 1e-4):
         self.half_life_seconds = half_life_seconds

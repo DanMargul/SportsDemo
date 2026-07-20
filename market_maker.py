@@ -72,7 +72,7 @@ async def run(args):
                                  fill_intensity_decay=args.k,
                                  quote_size=args.size,
                                  max_inventory=args.max_inventory)
-    volatility = quoting.EwmaVolatility()
+    volatility = quoting.VolatilityEWMA()
     feed = MarketDataFeed([args.ticker], include_fills=args.live)
     feed.on_book_update.append(
         lambda book: book.mid_cents is not None
