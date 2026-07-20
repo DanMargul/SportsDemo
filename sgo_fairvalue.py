@@ -35,7 +35,7 @@ def events_in(payload) -> list:
     return []
 
 
-class SgoOddWatch:
+class WatcherSGO:
     def __init__(self, event_id: str, odd_id: str,
                  max_age_seconds: float = 45.0, invert: bool = False,
                  strike_line=None):
@@ -158,7 +158,7 @@ class SgoOddWatch:
         return odds_by_bookmaker
 
 
-class SgoEventPoller:
+class EventPollerSGO:
     def __init__(self, event_id: str, poll_seconds: float = 10.0):
         self.event_id = event_id
         self.poll_seconds = poll_seconds
@@ -166,8 +166,8 @@ class SgoEventPoller:
         self._stop_requested = asyncio.Event()
 
     def watch(self, odd_id: str, strike_line=None, invert: bool = False,
-              max_age_seconds: float = 45.0) -> SgoOddWatch:
-        watcher = SgoOddWatch(self.event_id, odd_id,
+              max_age_seconds: float = 45.0) -> WatcherSGO:
+        watcher = WatcherSGO(self.event_id, odd_id,
                               max_age_seconds=max_age_seconds, invert=invert,
                               strike_line=strike_line)
         self.watchers.append(watcher)
@@ -228,7 +228,7 @@ def list_odds(args):
 
 
 def watch_odd(args):
-    watcher = SgoOddWatch(args.event_id, args.odd_id, invert=args.invert,
+    watcher = WatcherSGO(args.event_id, args.odd_id, invert=args.invert,
                           strike_line=args.line)
     while True:
         watcher.refresh()

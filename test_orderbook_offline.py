@@ -322,7 +322,7 @@ def test_sgo_fair_value():
                "fairOddsAvailable": True, "fairOverUnder": "249.5"},
         UNDER: {"oddID": UNDER, "bookOdds": "-104",
                 "bookOddsAvailable": True}})
-    watcher = sgo_fairvalue.SgoOddWatch("EV1", OVER)
+    watcher = sgo_fairvalue.WatcherSGO("EV1", OVER)
     watcher.refresh()
     assert captured["params"]["oddID"] == OVER
     assert captured["params"]["includeOpposingOdds"] == "true"
@@ -337,7 +337,7 @@ def test_sgo_fair_value():
                "bookOddsAvailable": False},
         UNDER: {"oddID": UNDER, "bookOdds": "+108",
                 "bookOddsAvailable": False}})
-    stale = sgo_fairvalue.SgoOddWatch("EV1", OVER)
+    stale = sgo_fairvalue.WatcherSGO("EV1", OVER)
     stale.refresh()
     assert stale.fresh_fair() is None
 
@@ -346,7 +346,7 @@ def test_sgo_fair_value():
                "bookOddsAvailable": True},
         UNDER: {"oddID": UNDER, "bookOdds": "+100",
                 "bookOddsAvailable": True}})
-    fallback = sgo_fairvalue.SgoOddWatch("EV1", OVER)
+    fallback = sgo_fairvalue.WatcherSGO("EV1", OVER)
     fallback.refresh()
     expected = devig.remove_vig(["-120", "+100"], "power")[0][0]
     assert abs(fallback.fair_probability - expected) < 1e-9
@@ -354,7 +354,7 @@ def test_sgo_fair_value():
 
     fake_get.payload = sgo_payload({
         OVER: {"oddID": OVER, "fairOdds": "-105", "fairOddsAvailable": True}})
-    inverted = sgo_fairvalue.SgoOddWatch("EV1", OVER, invert=True,
+    inverted = sgo_fairvalue.WatcherSGO("EV1", OVER, invert=True,
                                          max_age_seconds=1)
     inverted.refresh()
     assert abs(inverted.fair_probability
@@ -403,7 +403,7 @@ def test_sgo_strike_matching():
                                               "overUnder": "274.5",
                                               "available": True}]}}}})
 
-    at_strike = sgo_fairvalue.SgoOddWatch("EV1", OVER, strike_line="274.5")
+    at_strike = sgo_fairvalue.WatcherSGO("EV1", OVER, strike_line="274.5")
     at_strike.refresh()
     assert captured["params"]["includeAltLines"] == "true"
     import statistics
@@ -413,13 +413,13 @@ def test_sgo_strike_matching():
     assert abs(at_strike.fair_probability - expected) < 1e-9
     assert at_strike.source.startswith("altLines@274.5 (2 books")
 
-    at_consensus = sgo_fairvalue.SgoOddWatch("EV1", OVER, strike_line="249.5")
+    at_consensus = sgo_fairvalue.WatcherSGO("EV1", OVER, strike_line="249.5")
     at_consensus.refresh()
     assert at_consensus.source == "fairOdds@249.5"
     assert abs(at_consensus.fair_probability
                - devig.implied_probability("-105")) < 1e-9
 
-    missing = sgo_fairvalue.SgoOddWatch("EV1", OVER, strike_line="300.5")
+    missing = sgo_fairvalue.WatcherSGO("EV1", OVER, strike_line="300.5")
     missing.refresh()
     assert missing.fresh_fair() is None
     print("PASS SGO strike matching (alt-line median, consensus shortcut, "

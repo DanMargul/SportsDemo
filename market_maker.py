@@ -59,8 +59,8 @@ async def run(args):
     fair_watch = None
     fair_poller = None
     if args.sgo_odd:
-        from sgo_fairvalue import SgoEventPoller
-        fair_poller = SgoEventPoller(args.sgo_event, poll_seconds=args.sgo_poll)
+        from sgo_fairvalue import EventPollerSGO
+        fair_poller = EventPollerSGO(args.sgo_event, poll_seconds=args.sgo_poll)
         fair_watch = fair_poller.watch(args.sgo_odd, invert=args.sgo_invert,
                                        strike_line=args.sgo_line)
         fair_poller.refresh()
