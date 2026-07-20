@@ -50,13 +50,18 @@ class QuotePair:
     ask_size: int
 
     def __str__(self):
-        bid = f"{self.bid_cents}c x{self.bid_size}" if self.bid_cents else "-"
-        ask = f"{self.ask_cents}c x{self.ask_size}" if self.ask_cents else "-"
+        bid = f"{self.bid_cents}c x{self.bid_size}" \
+            if self.bid_cents \
+            else "-"
+        ask = f"{self.ask_cents}c x{self.ask_size}" \
+            if self.ask_cents \
+            else "-"
         return f"bid[{bid}] ask[{ask}]"
 
 
 def blended_fair_probability(book, config, external_fair_probability):
-    book_fair_cents = (book.microprice_cents if book.microprice_cents is not None
+    book_fair_cents = (book.microprice_cents
+                       if book.microprice_cents is not None
                        else book.mid_cents)
     if book_fair_cents is None:
         return external_fair_probability
@@ -107,7 +112,13 @@ def compute_quotes(book, inventory, sigma_per_sqrt_second, seconds_to_close,
     quote_ask = inventory > -config.max_inventory and ask_cents <= 99
     if not (quote_bid or quote_ask):
         return None
-    return QuotePair(bid_cents=bid_cents if quote_bid else None,
+    bid_arg = None
+    ask_arg = None
+    if quote_bid:
+        bid_arg = bid_cents
+    if quote_ask:
+        ask_arg = ask_cents
+    return QuotePair(bid_cents=bid_arg,
                      bid_size=config.quote_size,
-                     ask_cents=ask_cents if quote_ask else None,
+                     ask_cents=ask_arg,
                      ask_size=config.quote_size)
