@@ -28,8 +28,7 @@ def recent_log_lines():
     return list(_recent_log)
 
 
-async def run_market_maker(args):
-    # TODO: Reduce cognitive complexity
+async def run(args):
     if args.env:
         kalshi.environment = args.env
 
@@ -176,7 +175,9 @@ def main():
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)-7s %(message)s")
     parser = argparse.ArgumentParser(
-        description="Avellaneda-Stoikov market maker for a Kalshi market.")
+        description="Avellaneda-Stoikov market maker for one Kalshi market. "
+                    "Dry-run by default; --live places real post-only "
+                    "orders after a typed confirmation.")
     parser.add_argument("ticker")
     parser.add_argument("--live", action="store_true")
     parser.add_argument("--minutes", type=float, default=None)
@@ -197,15 +198,14 @@ def main():
                         help="Kalshi strike; fair computed at this exact line "
                              "via bookmaker alternate lines")
     parser.add_argument("--sgo-invert", action="store_true",
-                        help="use 1-p (if needed)")
+                        help="use 1-p (the chosen odd settles Kalshi NO)")
     parser.add_argument("--env", choices=["prod", "demo"], default=None)
     args = parser.parse_args()
     if bool(args.sgo_odd) != bool(args.sgo_event):
-        raise SystemExit("--sgo-event and --sgo-odd "
-                         "both required for SportsGameOdds integration")
+        raise SystemExit("--sgo-event and --sgo-odd must be given together")
     if args.env:
         kalshi.environment = args.env
-    asyncio.run(run_market_maker(args))
+    asyncio.run(run(args))
 
 
 if __name__ == "__main__":
