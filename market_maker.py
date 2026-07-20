@@ -205,11 +205,11 @@ def main():
         raise SystemExit("--sgo-event and --sgo-odd must be given together")
     if args.env:
         kalshi.environment = args.env
-    if args.live:
-        typed = input(f"LIVE orders on {kalshi.environment.upper()} with real "
-                      f"money. Type '{args.ticker}' to confirm: ")
-        if typed.strip() != args.ticker:
-            raise SystemExit("aborted")
+    # if args.live:
+    #     typed = input(f"LIVE orders on {kalshi.environment.upper()} with real "
+    #                   f"money. Type '{args.ticker}' to confirm: ")
+    #     if typed.strip() != args.ticker:
+    #         raise SystemExit("aborted")
     asyncio.run(run(args))
 
 
