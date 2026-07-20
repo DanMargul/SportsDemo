@@ -43,7 +43,9 @@ class WatcherSGO:
         self.odd_id = odd_id
         self.max_age_seconds = max_age_seconds
         self.invert = invert
-        self.strike_line = float(strike_line) if strike_line is not None else None
+        self.strike_line = float(strike_line) \
+            if strike_line is not None \
+            else None
         self.fair_probability = None
         self.consensus_line = None
         self.market_name = ""
@@ -83,12 +85,16 @@ class WatcherSGO:
                                or odd.get("bookOverUnder"))
         if odd.get("cancelled") or odd.get("ended"):
             self.fair_probability = None
-            log.warning("SGO odd %s is %s", self.odd_id,
-                        "cancelled" if odd.get("cancelled") else "ended")
+            log.warning("SGO odd %s is %s",
+                        self.odd_id,
+                        "cancelled"
+                        if odd.get("cancelled")
+                        else "ended")
             return
         probability = self._fair_probability_from(odd, event_odds)
         if probability is not None:
-            self.fair_probability = ((1.0 - probability) if self.invert
+            self.fair_probability = (1.0 - probability
+                                     if self.invert
                                      else probability)
             self.updated_at = time.time()
 
@@ -101,7 +107,8 @@ class WatcherSGO:
             self.source = "fairOdds"
             return devig.implied_probability(odd["fairOdds"])
         consensus = (odd.get("bookOdds")
-                     if odd.get("bookOddsAvailable", True) else None)
+                     if odd.get("bookOddsAvailable", True)
+                     else None)
         opposing_consensus = (opposing_odd.get("bookOdds")
                               if opposing_odd.get("bookOddsAvailable", True)
                               else None)
@@ -114,6 +121,7 @@ class WatcherSGO:
         return None
 
     def _fair_at_strike(self, odd: dict, opposing_odd: dict):
+        # TODO Reduce cognitive complexity
         strike = self.strike_line
         consensus_line = odd.get("fairOverUnder")
         if (consensus_line is not None
@@ -205,7 +213,9 @@ def list_events(args):
         matchup = " vs ".join(
             str(teams.get(side, {}).get("names", {}).get("long")
                 or teams.get(side, {}).get("teamID", side))
-            for side in ("away", "home")) if teams else ""
+            for side in ("away", "home")
+        ) if teams \
+            else ""
         row = (f"{event.get('eventID', ''):42s} {matchup}  "
                f"{event.get('status', {}).get('startsAt', '')}")
         if not args.search or args.search.lower() in row.lower():
@@ -221,8 +231,9 @@ def list_odds(args):
                       or odd.get("bookOddsAvailable", True))
         row = (f"{odd_id:60s} fair={odd.get('fairOdds', '?'):>6} "
                f"book={odd.get('bookOdds', '?'):>6} "
-               f"line={odd.get('fairOverUnder') or odd.get('bookOverUnder') or '-'}"
-               + ("  [stale/closed]" if closed else ""))
+               f"line={odd.get('fairOverUnder') or odd.get('bookOverUnder') or '-'}")
+        if closed:
+            row += "  [stale/closed]"
         if not args.grep or args.grep.lower() in odd_id.lower():
             print(row)
 
