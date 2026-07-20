@@ -30,7 +30,7 @@ For these commands to run without immediate failure, the user must set the follo
 
 ## Future
 * More Documentation
-* Automated discovery and matching of KALSHI 'tickers' and SportsGameOdds 'odd IDs'
+* Automated discovery and matching of Kalshi 'tickers' and SportsGameOdds 'odd IDs'
 * Infrastructure for trading on multiple markets simultaneously (dashboard update as well?)
 * (Research) Derive inter-market correlation factors from historical data
 * Trade on Polymarket (other prediction markets?)
