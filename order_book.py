@@ -3,7 +3,9 @@ from dataclasses import dataclass, field
 
 def parse_price_levels(message: dict, side_key: str) -> dict:
     dollar_rows = message.get(f"{side_key}_dollars")
-    rows = dollar_rows if dollar_rows is not None else (message.get(side_key) or [])
+    rows = dollar_rows \
+        if dollar_rows is not None \
+        else (message.get(side_key) or [])
     levels = {}
     for price, quantity_value in rows:
         if dollar_rows is not None:
@@ -49,7 +51,9 @@ class OrderBook:
         else:
             price_cents = int(message.get("price", 0))
         quantity_delta = float(message.get("delta_fp", message.get("delta", 0)))
-        side_levels = self.yes_bids if message.get("side") == "yes" else self.no_bids
+        side_levels = self.yes_bids \
+            if message.get("side") == "yes" \
+            else self.no_bids
         new_quantity = side_levels.get(price_cents, 0.0) + quantity_delta
         if new_quantity <= 1e-9:
             side_levels.pop(price_cents, None)
