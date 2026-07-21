@@ -1,7 +1,7 @@
 
 # Automated Market Making Project (Work in Progress)
 
-In the video below, a market making session is initiated during LA Dodgers @ NY Yankees (July 19, 2026, Game 2 of doubleheader):
+In the video below, a market making session is initiated on Kalshi. The market is over/under 8.5 total runs during LA Dodgers @ NY Yankees (July 19, 2026, Game 2 of doubleheader):
 
 https://github.com/user-attachments/assets/502fc4e5-4150-45b1-831e-a4c9c4093df6
 
