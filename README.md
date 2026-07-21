@@ -39,4 +39,5 @@ For these commands to run without immediate failure, the user must set the follo
 * [Kalshi API Documentation](https://docs.kalshi.com/welcome)
 * [SportsGameOdds API Documentation](https://sportsgameodds.com/docs)
 * [Avellaneda, M., & Stoikov, S. (2008). High-frequency trading in a limit order book. Quantitative Finance, 8(3), 217-224.](https://people.orie.cornell.edu/sfs33/LimitOrderBook.pdf)
+* [Dalen, S. (2025). Toward Black Scholes for Prediction Markets: A Unified Kernel and Market Maker's Handbook. arXiv preprint arXiv:2510.15205.](https://arxiv.org/abs/2510.15205)
 * [(Wikipedia) Mathematics of bookmaking -> Overround](https://en.wikipedia.org/wiki/Mathematics_of_bookmaking#Overround)
