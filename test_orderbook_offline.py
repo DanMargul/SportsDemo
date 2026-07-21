@@ -11,7 +11,7 @@ from dashboard_state import write_state, read_state
 from order_book import OrderBook
 from market_data_feed import MarketDataFeed
 from order_manager import OrderManager, fill_price_cents, fill_direction
-from quoting import VolatilityEWMA, QuotePair, QuoteConfig, compute_quotes
+from quoting import EwmaVolatility, QuotePair, QuoteConfig, compute_quotes
 
 
 def test_order_book():
@@ -75,8 +75,8 @@ def test_feed_dispatch():
 
 
 def test_ewma_volatility():
-    volatility = VolatilityEWMA(half_life_seconds=60.0)
-    quiet = VolatilityEWMA(half_life_seconds=60.0)
+    volatility = EwmaVolatility(half_life_seconds=60.0)
+    quiet = EwmaVolatility(half_life_seconds=60.0)
     price = 0.50
     for step in range(200):
         price += (0.02 if step % 2 else -0.02)
@@ -152,7 +152,7 @@ def test_quoting():
 def test_dry_run_loop_step():
     feed = MarketDataFeed(["T"])
     config = quoting.QuoteConfig()
-    volatility = quoting.VolatilityEWMA()
+    volatility = quoting.EwmaVolatility()
     feed.on_book_update.append(
         lambda book: book.mid_cents is not None
         and volatility.update(book.mid_cents / 100.0))
@@ -322,7 +322,7 @@ def test_sgo_fair_value():
                "fairOddsAvailable": True, "fairOverUnder": "249.5"},
         UNDER: {"oddID": UNDER, "bookOdds": "-104",
                 "bookOddsAvailable": True}})
-    watcher = sgo_fairvalue.WatcherSGO("EV1", OVER)
+    watcher = sgo_fairvalue.SgoOddWatch("EV1", OVER)
     watcher.refresh()
     assert captured["params"]["oddID"] == OVER
     assert captured["params"]["includeOpposingOdds"] == "true"
@@ -337,7 +337,7 @@ def test_sgo_fair_value():
                "bookOddsAvailable": False},
         UNDER: {"oddID": UNDER, "bookOdds": "+108",
                 "bookOddsAvailable": False}})
-    stale = sgo_fairvalue.WatcherSGO("EV1", OVER)
+    stale = sgo_fairvalue.SgoOddWatch("EV1", OVER)
     stale.refresh()
     assert stale.fresh_fair() is None
 
@@ -346,7 +346,7 @@ def test_sgo_fair_value():
                "bookOddsAvailable": True},
         UNDER: {"oddID": UNDER, "bookOdds": "+100",
                 "bookOddsAvailable": True}})
-    fallback = sgo_fairvalue.WatcherSGO("EV1", OVER)
+    fallback = sgo_fairvalue.SgoOddWatch("EV1", OVER)
     fallback.refresh()
     expected = devig.remove_vig(["-120", "+100"], "power")[0][0]
     assert abs(fallback.fair_probability - expected) < 1e-9
@@ -354,7 +354,7 @@ def test_sgo_fair_value():
 
     fake_get.payload = sgo_payload({
         OVER: {"oddID": OVER, "fairOdds": "-105", "fairOddsAvailable": True}})
-    inverted = sgo_fairvalue.WatcherSGO("EV1", OVER, invert=True,
+    inverted = sgo_fairvalue.SgoOddWatch("EV1", OVER, invert=True,
                                          max_age_seconds=1)
     inverted.refresh()
     assert abs(inverted.fair_probability
@@ -403,7 +403,7 @@ def test_sgo_strike_matching():
                                               "overUnder": "274.5",
                                               "available": True}]}}}})
 
-    at_strike = sgo_fairvalue.WatcherSGO("EV1", OVER, strike_line="274.5")
+    at_strike = sgo_fairvalue.SgoOddWatch("EV1", OVER, strike_line="274.5")
     at_strike.refresh()
     assert captured["params"]["includeAltLines"] == "true"
     import statistics
@@ -413,17 +413,125 @@ def test_sgo_strike_matching():
     assert abs(at_strike.fair_probability - expected) < 1e-9
     assert at_strike.source.startswith("altLines@274.5 (2 books")
 
-    at_consensus = sgo_fairvalue.WatcherSGO("EV1", OVER, strike_line="249.5")
+    at_consensus = sgo_fairvalue.SgoOddWatch("EV1", OVER, strike_line="249.5")
     at_consensus.refresh()
     assert at_consensus.source == "fairOdds@249.5"
     assert abs(at_consensus.fair_probability
                - devig.implied_probability("-105")) < 1e-9
 
-    missing = sgo_fairvalue.WatcherSGO("EV1", OVER, strike_line="300.5")
+    missing = sgo_fairvalue.SgoOddWatch("EV1", OVER, strike_line="300.5")
     missing.refresh()
     assert missing.fresh_fair() is None
     print("PASS SGO strike matching (alt-line median, consensus shortcut, "
           "missing strike)")
+
+
+def test_sgo_shared_poll():
+    OVER, UNDER = "py-P1-game-ou-over", "py-P1-game-ou-under"
+    call_log = []
+
+    def counting_get(path, params):
+        call_log.append(params)
+        return sgo_payload({
+            OVER: {"oddID": OVER, "opposingOddID": UNDER, "fairOdds": "-110",
+                   "fairOddsAvailable": True, "fairOverUnder": "249.5"},
+            UNDER: {"oddID": UNDER, "opposingOddID": OVER, "fairOdds": "+120",
+                    "fairOddsAvailable": True, "fairOverUnder": "249.5"}})
+    sgo_fairvalue.sgo_get = counting_get
+
+    poller = sgo_fairvalue.SgoEventPoller("EV1")
+    over_watch = poller.watch(OVER)
+    under_watch = poller.watch(UNDER, invert=True)
+    poller.refresh()
+
+    assert len(call_log) == 1, f"expected 1 HTTP call, got {len(call_log)}"
+    assert call_log[0]["oddID"] == f"{OVER},{UNDER}"
+    assert call_log[0]["includeOpposingOdds"] == "true"
+    assert "includeAltLines" not in call_log[0]
+    assert over_watch.fresh_fair() is not None
+    assert under_watch.fresh_fair() is not None
+    assert abs(under_watch.fair_probability
+               - (1 - devig.implied_probability("+120"))) < 1e-9
+
+    strike_watch = poller.watch(OVER, strike_line="249.5")
+    poller.refresh()
+    assert call_log[-1]["includeAltLines"] == "true"
+    print("PASS SGO shared poll (one HTTP call for many watchers, alt-line "
+          "opt-in)")
+
+
+def test_ticker_parsing():
+    from market_catalog import parse_ticker
+    total = parse_ticker("KXMLBTOTAL-26JUL191920LADNYY-9")
+    assert total.strike == 8.5 and total.team_codes == ("LAD", "NYY")
+    assert total.game_number == 1 and total.family.has_strike
+
+    prop = parse_ticker("KXMLBHRR-26JUL191920LADNYYG2-LADMBETTS50-2")
+    assert prop.strike == 1.5, f"prop strike {prop.strike}"
+    assert prop.player_code == "MBETTS50" and prop.game_number == 2
+
+    moneyline = parse_ticker("KXMLBGAME-26JUL191920LADNYY-NYY")
+    assert moneyline.side_code == "NYY" and moneyline.strike is None
+
+    unknown = parse_ticker("KXNFLZZZ-whatever")
+    assert unknown.family is None and unknown.notes
+    print("PASS ticker parsing (total, player prop, moneyline, doubleheader, "
+          "unknown family)")
+
+
+def test_event_ranking():
+    from market_catalog import parse_ticker
+    from event_matcher import rank_events
+    parsed = parse_ticker("KXMLBTOTAL-26JUL191920LADNYY-9")
+    events = [
+        {"eventID": "RIGHT", "teams": {
+            "away": {"names": {"long": "Los Angeles Dodgers"}},
+            "home": {"names": {"long": "New York Yankees"}}},
+         "status": {"startsAt": "2026-07-19T23:20:00Z"}},
+        {"eventID": "WRONGDATE", "teams": {
+            "away": {"names": {"long": "Los Angeles Dodgers"}},
+            "home": {"names": {"long": "New York Yankees"}}},
+         "status": {"startsAt": "2026-07-25T23:20:00Z"}},
+        {"eventID": "WRONGTEAMS", "teams": {
+            "away": {"names": {"long": "Detroit Tigers"}},
+            "home": {"names": {"long": "Los Angeles Angels"}}},
+         "status": {"startsAt": "2026-07-19T23:20:00Z"}}]
+    ranked = rank_events(parsed, events)
+    assert ranked[0].sgo_event_id == "RIGHT"
+    assert ranked[0].confidence > ranked[1].confidence > ranked[2].confidence
+    assert ranked[0].confidence >= 0.85
+    print("PASS event ranking (correct match ranks first, distractors below)")
+
+
+def test_odd_side_inference():
+    from market_catalog import parse_ticker
+    from odd_matcher import match_odd
+    odds = {"points-all-game-ou-over": {}, "points-home-game-ml-home": {}}
+
+    total = match_odd(parse_ticker("KXMLBTOTAL-26JUL191920LADNYY-9"), odds)
+    assert total.invert is False and total.sgo_line == 8.5
+
+    home = match_odd(parse_ticker("KXMLBGAME-26JUL191920LADNYY-NYY"), odds)
+    assert home.invert is False   # NYY is home (last code)
+
+    away = match_odd(parse_ticker("KXMLBGAME-26JUL182207DETLAA-DET"), odds)
+    assert away.invert is True    # DET is away (first code) -> invert
+    assert any("VERIFY" in c for c in away.concerns)
+
+    assert all("SETTLEMENT" in " ".join(m.concerns).upper()
+               for m in (total, home, away))
+    print("PASS odd side inference (over no-invert, home no-invert, away "
+          "invert+verify, settlement always flagged)")
+
+
+def test_player_prop_flagged():
+    from market_catalog import parse_ticker
+    from odd_matcher import match_odd
+    prop = match_odd(parse_ticker(
+        "KXMLBHRR-26JUL191920LADNYYG2-LADMBETTS50-2"), {})
+    assert prop.confidence <= 0.3
+    assert any("hand" in c.lower() for c in prop.concerns)
+    print("PASS player prop flagged (low confidence, must-set-by-hand)")
 
 
 def main():
@@ -443,8 +551,13 @@ def main():
     test_fill_helpers()
     test_fill_updates_position_from_resting()
     test_dashboard_state_roundtrip()
+    test_ticker_parsing()
+    test_event_ranking()
+    test_odd_side_inference()
+    test_player_prop_flagged()
     test_sgo_fair_value()
     test_sgo_strike_matching()
+    test_sgo_shared_poll()
     print("\nall offline tests passed")
 
 
