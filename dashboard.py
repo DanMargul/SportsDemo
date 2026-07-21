@@ -123,7 +123,9 @@ class DashboardView:
 
         self.ticker_label.text = state.get("ticker", "--")
         self.env_chip.text = state.get("env", "")
-        self.mode_chip.text = "LIVE" if state.get("live") else "DRY RUN"
+        self.mode_chip.text = "LIVE" \
+            if state.get("live") \
+            else "DRY RUN"
         self.mode_chip.style(
             f"font-size:11px;padding:2px 9px;border:1px solid "
             f"{AMBER if state.get('live') else LINE};border-radius:3px;"

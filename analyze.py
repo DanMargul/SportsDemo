@@ -37,7 +37,9 @@ def main():
         volatility.update(price_cents / 100.0,
                           kalshi.parse_iso_timestamp(trade.get("created_time")))
         total_volume += contracts
-        signed_flow += contracts if trade.get("taker_side") == "yes" else -contracts
+        signed_flow += contracts \
+            if trade.get("taker_side") == "yes" \
+            else -contracts
 
     print(f"{market.get('title', '')} | {market.get('yes_sub_title', '')}")
     print(f"status={market.get('status')} close={market.get('close_time')} "
