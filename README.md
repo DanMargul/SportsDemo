@@ -10,14 +10,16 @@ As demonstrated in the screen recording above, a live market making session is i
 
     python market_maker.py --live <KALSHI_TICKER> --sgo-event <EVENT_ID> --sgo-odd <ODD_ID> --sgo-line <LINE> --minutes <SESSION_LENGTH_MINUTES> --interval <MARKET_DATA_REFRESH_INTERVAL_SECONDS> --size <MAXIMUM_SIZE_ORDER>
 
+For this command to run without immediate failure, the user must set the following environment variables:
+* KALSHI_API_KEY_ID
+* KALSHI_PRIVATE_KEY_PATH
+* SGO_API_KEY
+
 The session can be visualized if `python market_maker.py` is run with the argument `--state-file <STATE_FILE_PATH>`. In a separate terminal:
 
     python dashboard.py --state-file <STATE_FILE_PATH>
 
-For these commands to run without immediate failure, the user must set the following environment variables:
-* KALSHI_API_KEY_ID
-* KALSHI_PRIVATE_KEY_PATH
-* SGO_API_KEY
+
 
 ## Capabilities
 * Representation and analysis of (Kalshi) live order book
