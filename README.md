@@ -8,7 +8,7 @@ https://github.com/user-attachments/assets/502fc4e5-4150-45b1-831e-a4c9c4093df6
 ## How To Run
 As demonstrated in the screen recording above, a live market making session is initiated with `python market_maker.py`
 
-    python market_maker.py --live <KALSHI_TICKER> --sgo-event <EVENT_ID> --sgo-odd <ODD_ID> --sgo-line <LINE> --minutes <SESSION_LENGTH_MINUTES> --size <MAXIMUM_SIZE_ORDER>
+    python market_maker.py --live <KALSHI_TICKER> --sgo-event <EVENT_ID> --sgo-odd <ODD_ID> --sgo-line <LINE> --minutes <SESSION_LENGTH_MINUTES> --interval <MARKET_DATA_REFRESH_INTERVAL_SECONDS> --size <MAXIMUM_SIZE_ORDER>
 
 The session can be visualized if `python market_maker.py` is run with the argument `--state-file <STATE_FILE_PATH>`. In a separate terminal:
 
