@@ -5,20 +5,28 @@ In the video below, a market making session is initiated on Kalshi. The market i
 
 https://github.com/user-attachments/assets/502fc4e5-4150-45b1-831e-a4c9c4093df6
 
-## How To Run
-As demonstrated in the screen recording above, a live market making session is initiated with `python market_maker.py`
+## How To Run 
+
+This is a minimal example of a live market-making session:
+
+    python market_maker.py --live <KALSHI_TICKER>
+
+The user must have a Kalshi account with an API key and a private key file. They must be declared as environment variables:
+
+    export KALSHI_API_KEY_ID=<KALSHI_API_KEY_ID>
+    export KALSHI_PRIVATE_KEY_PATH=<KALSHI_PRIVATE_KEY_PATH>
+
+As demonstrated in the screen recording above, a live market making session can be initiated with many more arguments:
 
     python market_maker.py --live <KALSHI_TICKER> --sgo-event <EVENT_ID> --sgo-odd <ODD_ID> --sgo-line <LINE> --minutes <SESSION_LENGTH_MINUTES> --interval <MARKET_DATA_REFRESH_INTERVAL_SECONDS> --size <MAXIMUM_SIZE_ORDER>
 
-For this command to run without immediate failure, the user must set the following environment variables:
-* KALSHI_API_KEY_ID
-* KALSHI_PRIVATE_KEY_PATH
-* SGO_API_KEY
+If any of {`--sgo-event`, `--sgo-odd`, `--sgo-line`} are used, a SportsGameOdds API key is required:
+
+    export SGO_API_KEY=<SGO_API_KEY>
 
 The session can be visualized if `python market_maker.py` is run with the argument `--state-file <STATE_FILE_PATH>`. In a separate terminal:
 
     python dashboard.py --state-file <STATE_FILE_PATH>
-
 
 
 ## Capabilities
