@@ -468,15 +468,30 @@ def test_ticker_parsing():
 
     prop = parse_ticker("KXMLBHRR-26JUL191920LADNYYG2-LADMBETTS50-2")
     assert prop.strike == 1.5, f"prop strike {prop.strike}"
-    assert prop.player_code == "MBETTS50" and prop.game_number == 2
+    assert prop.player_code == "LADMBETTS50" and prop.game_number == 2
+    from player_codes import decode_player_code
+    decoded = decode_player_code(prop.player_code, set(prop.team_codes))
+    assert decoded.last_name == "BETTS" and decoded.number == "50"
 
     moneyline = parse_ticker("KXMLBGAME-26JUL191920LADNYY-NYY")
     assert moneyline.side_code == "NYY" and moneyline.strike is None
 
     unknown = parse_ticker("KXNFLZZZ-whatever")
     assert unknown.family is None and unknown.notes
+    from market_catalog import TEAM_ALIASES
+    assert len(TEAM_ALIASES["mlb"]) == 30, "expected all 30 MLB teams"
+
+    ath = parse_ticker("KXMLBHRR-26JUL212140ATHAZ-ATHTWHITE47-4")
+    assert ath.team_codes == ("ATH", "ARI")   # AZ normalizes to ARI
+    d_ath = decode_player_code(ath.player_code, set(ath.team_codes))
+    assert d_ath.last_name == "WHITE" and d_ath.team == "ATH"
+
+    sea = parse_ticker("KXMLBHRR-26JUL212140SEALAA-SEAWWILSON32-3")
+    assert sea.team_codes == ("SEA", "LAA")
+    d_sea = decode_player_code(sea.player_code, set(sea.team_codes))
+    assert d_sea.last_name == "WILSON" and d_sea.number == "32"
     print("PASS ticker parsing (total, player prop, moneyline, doubleheader, "
-          "unknown family)")
+          "unknown family, all-30-teams, AZ/ATH/SEA)")
 
 
 def test_event_ranking():
@@ -544,7 +559,7 @@ def test_scan_fetches_sgo_once():
             "odds": {"points-all-game-ou-over": {},
                      "points-home-game-ml-home": {}}}]}
     discover.sgo_get = counting_sgo
-    discover._crosswalk._cache = {}
+    discover._id_map._cache = {}
     try:
         with contextlib.redirect_stdout(io.StringIO()):
             discover.scan(argparse.Namespace(series="KXMLBTOTAL", event=None,
@@ -630,8 +645,161 @@ def test_player_code_decoding():
     print("PASS player code decoding (team/initial/name/number, hyphen names)")
 
 
+def test_name_scoring_against_market_names():
+    from player_codes import decode_player_code, name_similarity
+    decoded = decode_player_code("ATHTSODERSTROM21", {"ATH", "ARI"})
+    # SGO exposes the player inside a market name, not as a bare name
+    for text in ["Tyler Soderstrom Hits + Runs + RBIs",
+                 "Tyler Soderstrom Hits + Runs + RBIs Over/Under",
+                 "TYLER_SODERSTROM_1_MLB",
+                 "Tyler Soderstrom"]:
+        assert name_similarity(decoded, text) == 1.0, text
+    assert name_similarity(decoded, "Over/Under") == 0.0
+    assert name_similarity(decoded, "Tyler White Hits + Runs + RBIs") == 0.0
+
+    # a contradicting first initial is evidence AGAINST, not neutral
+    wilson = decode_player_code("SEAWWILSON32", {"CIN", "SEA"})
+    assert name_similarity(wilson, "JACOB_WILSON_1_MLB") < 0.7
+    assert name_similarity(wilson, "Jacob Wilson Hits + Runs + RBIs") < 0.7
+    assert name_similarity(wilson, "WILL_WILSON_1_MLB") == 1.0
+    print("PASS name scoring (market names, entity IDs, wrong-initial "
+          "refused)")
+
+
+def test_hard_player_name_shapes():
+    from player_codes import decode_player_code, name_similarity
+    from market_catalog import parse_ticker, ticker_codes_for
+
+    # multi-word surname: Kalshi concatenates, SGO splits
+    delacruz = decode_player_code("CINEDELACRUZ44", {"CIN", "SEA"})
+    assert delacruz.last_name == "DELACRUZ"
+    assert name_similarity(delacruz, "ELLY_DE_LA_CRUZ_1_MLB") == 1.0
+
+    # dropped accent: Kalshi RODRGUEZ vs SGO RODRIGUEZ
+    rodriguez = decode_player_code("SEAJRODRGUEZ44", {"CIN", "SEA"})
+    assert name_similarity(rodriguez, "JULIO_RODRIGUEZ_1_MLB") >= 0.85
+    assert name_similarity(rodriguez, "Julio Rodr\u00edguez Hits + Runs") >= 0.85
+
+    # Kalshi ticker-code alias in the player segment (AZ, not ARI)
+    parsed = parse_ticker("KXMLBHRR-26JUL221540ATHAZ-AZCCARROLL7-1")
+    codes = ticker_codes_for(parsed.league, parsed.team_codes)
+    carroll = decode_player_code(parsed.player_code, codes)
+    assert carroll.last_name == "CARROLL" and carroll.first_initial == "C"
+    assert name_similarity(carroll, "CORBIN_CARROLL_1_MLB") == 1.0
+
+    # fuzzy matching must not conflate genuinely different surnames
+    marte = decode_player_code("AZKMARTE4", {"AZ", "ARI"})
+    assert name_similarity(marte, "J_D_MARTINEZ_1_MLB") < 0.7
+    print("PASS hard player names (multi-word surname, dropped accent, "
+          "ticker alias, no false conflation)")
+
+
+def test_csv_review_roundtrip():
+    import csv, io, json, os, tempfile, contextlib, argparse
+    import discover
+
+    entries = [
+        {"ticker": "AAA", "sgo_event": "EV", "sgo_odd": "points-all-game-ou-over",
+         "sgo_line": 8.5, "_confidence": 0.8,
+         "_evidence": {"kalshi_teams": "ATH/ARI", "player_decoded": "",
+                       "player_entity": "", "player_score": ""}},
+        {"ticker": "BBB", "sgo_event": "EV",
+         "sgo_odd": "batting_hits+runs+rbi-PLAYER_UNKNOWN-game-ou-over",
+         "sgo_line": 1.5, "_confidence": 0.2, "_REVIEW": "unresolved player",
+         "_evidence": {"kalshi_teams": "ATH/ARI",
+                       "player_decoded": "J. Wilson #5",
+                       "player_entity": "", "player_score": 0.0}},
+        {"ticker": "CCC", "sgo_event": "EV", "sgo_odd": "points-home-game-ml-home",
+         "sgo_invert": True, "_confidence": 0.8, "_REVIEW": "away side",
+         "_evidence": {}},
+    ]
+    directory = tempfile.mkdtemp()
+    csv_path = os.path.join(directory, "draft.csv")
+    rows = discover.write_csv(entries, csv_path)
+    assert rows[0]["ticker"] in {"BBB", "CCC"}      # flagged rows sort first
+    assert rows[-1]["ticker"] == "AAA"
+    written = list(csv.DictReader(open(csv_path)))
+    assert set(discover.CSV_COLUMNS) == set(written[0].keys())
+
+    # build skips flagged rows
+    out_path = os.path.join(directory, "markets.json")
+    with contextlib.redirect_stdout(io.StringIO()):
+        discover.build_config(argparse.Namespace(
+            csv=csv_path, out=out_path, include_flagged=False))
+    config = json.load(open(out_path))
+    assert [m["ticker"] for m in config["markets"]] == ["AAA"]
+    assert config["markets"][0]["sgo_line"] == 8.5
+
+    # clearing the flag admits the row, but PLAYER_UNKNOWN is still refused
+    for row in written:
+        row["needs_review"] = ""
+    reviewed = os.path.join(directory, "reviewed.csv")
+    with open(reviewed, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=discover.CSV_COLUMNS)
+        writer.writeheader()
+        writer.writerows(written)
+    with contextlib.redirect_stdout(io.StringIO()):
+        discover.build_config(argparse.Namespace(
+            csv=reviewed, out=out_path, include_flagged=False))
+    config = json.load(open(out_path))
+    tickers = [m["ticker"] for m in config["markets"]]
+    assert "BBB" not in tickers, "PLAYER_UNKNOWN leaked into a runnable config"
+    by_ticker = {m["ticker"]: m for m in config["markets"]}
+    assert "CCC" in by_ticker and by_ticker["CCC"].get("sgo_invert") is True
+    print("PASS CSV review roundtrip (flagged first, build skips flagged, "
+          "PLAYER_UNKNOWN refused, invert preserved)")
+
+
+def test_ambiguous_player_forces_review():
+    import argparse, io, contextlib
+    import discover
+    def fake_sgo(path, params):
+        return {"data": [{"eventID": "EV",
+            "teams": {"away": {"names": {"long": "Athletics"}},
+                      "home": {"names": {"long": "Arizona Diamondbacks"}}},
+            "status": {"startsAt": "2026-07-22T01:40:00Z"},
+            "odds": {
+                "batting_hits+runs+rbi-JACOB_WILSON_1_MLB-game-ou-over":
+                    {"marketName": "Jacob Wilson Hits + Runs + RBIs"},
+                "batting_hits+runs+rbi-JOSH_WILSON_1_MLB-game-ou-over":
+                    {"marketName": "Josh Wilson Hits + Runs + RBIs"}}}]}
+    original = discover.sgo_get
+    discover.sgo_get = fake_sgo
+    discover._id_map._cache = {}
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            entry = discover.propose(argparse.Namespace(
+                ticker="KXMLBHRR-26JUL212140ATHAZ-ATHJWILSON5-2", search=None))
+    finally:
+        discover.sgo_get = original
+    assert "_REVIEW" in entry and "ambiguous" in entry["_REVIEW"]
+    print("PASS ambiguous player match is flagged in the draft config")
+
+
+def test_event_local_time_and_tiebreak():
+    from market_catalog import parse_ticker
+    from event_matcher import rank_events
+    parsed = parse_ticker("KXMLBHRR-26JUL212140ATHAZ-ATHTSODERSTROM21-2")
+    assert parsed.time_hhmm == "2140"
+    events = [
+        {"eventID": "RIGHT",
+         "teams": {"away": {"names": {"long": "Athletics"}},
+                   "home": {"names": {"long": "Arizona Diamondbacks"}}},
+         "status": {"startsAt": "2026-07-22T01:40:00Z"}},
+        {"eventID": "NEXTDAY",
+         "teams": {"away": {"names": {"long": "Athletics"}},
+                   "home": {"names": {"long": "Arizona Diamondbacks"}}},
+         "status": {"startsAt": "2026-07-22T22:10:00Z"}}]
+    ranked = rank_events(parsed, events)
+    assert ranked[0].sgo_event_id == "RIGHT"
+    # a 21:40 ET game stored as next-day UTC must still be a full date match
+    assert ranked[0].confidence >= 0.9, ranked[0].confidence
+    assert ranked[0].confidence > ranked[1].confidence
+    print("PASS event local-time date match and start-time tiebreak")
+
+
 def test_player_resolution_in_event():
-    from player_crosswalk import resolve_player, entity_ids_in_event
+    from player_id_map import resolve_player, entity_ids_in_event
     event_odds = {
         "batting_hits+runs+rbi-SHOHEI_OHTANI_1_MLB-game-ou-over": {
             "statEntityName": "Shohei Ohtani"},
@@ -649,13 +817,13 @@ def test_player_resolution_in_event():
 
     cached, cscore, csource, _ = resolve_player(
         "LADSOHTANI17", {"LAD"}, stat, {},
-        crosswalk={"LADSOHTANI17": "SHOHEI_OHTANI_1_MLB"})
-    assert cached == "SHOHEI_OHTANI_1_MLB" and csource == "crosswalk"
+        id_map={"LADSOHTANI17": "SHOHEI_OHTANI_1_MLB"})
+    assert cached == "SHOHEI_OHTANI_1_MLB" and csource == "id-map"
 
     missing, mscore, msource, mconcerns = resolve_player(
         "MINBBUXTON25", {"MIN"}, stat, event_odds)
     assert missing is None and mconcerns
-    print("PASS player resolution (event harvest, crosswalk cache, "
+    print("PASS player resolution (event harvest, ID map cache, "
           "no-fabrication when absent)")
 
 
@@ -686,6 +854,11 @@ def main():
     test_player_prop_flagged()
     test_player_code_decoding()
     test_player_resolution_in_event()
+    test_name_scoring_against_market_names()
+    test_event_local_time_and_tiebreak()
+    test_hard_player_name_shapes()
+    test_ambiguous_player_forces_review()
+    test_csv_review_roundtrip()
     test_sgo_fair_value()
     test_sgo_strike_matching()
     test_sgo_shared_poll()
