@@ -5,14 +5,36 @@ from datetime import datetime, timezone
 
 TEAM_ALIASES = {
     "mlb": {
-        "LAD": {"los angeles dodgers", "dodgers", "la dodgers", "lad"},
-        "NYY": {"new york yankees", "yankees", "ny yankees", "nyy"},
-        "CIN": {"cincinnati reds", "reds", "cin"},
-        "COL": {"colorado rockies", "rockies", "col"},
-        "LAA": {"los angeles angels", "angels", "la angels", "laa"},
-        "DET": {"detroit tigers", "tigers", "det"},
+        "ARI": {"arizona diamondbacks", "diamondbacks", "dbacks", "ari", "az"},
+        "ATL": {"atlanta braves", "braves", "atl"},
+        "BAL": {"baltimore orioles", "orioles", "bal"},
         "BOS": {"boston red sox", "red sox", "bos"},
+        "CHC": {"chicago cubs", "cubs", "chc"},
+        "CWS": {"chicago white sox", "white sox", "cws", "chw"},
+        "CIN": {"cincinnati reds", "reds", "cin"},
+        "CLE": {"cleveland guardians", "guardians", "cle"},
+        "COL": {"colorado rockies", "rockies", "col"},
+        "DET": {"detroit tigers", "tigers", "det"},
+        "HOU": {"houston astros", "astros", "hou"},
+        "KC": {"kansas city royals", "royals", "kc", "kcr"},
+        "LAA": {"los angeles angels", "angels", "la angels", "laa", "ana"},
+        "LAD": {"los angeles dodgers", "dodgers", "la dodgers", "lad"},
+        "MIA": {"miami marlins", "marlins", "mia", "fla"},
+        "MIL": {"milwaukee brewers", "brewers", "mil"},
+        "MIN": {"minnesota twins", "twins", "min"},
         "NYM": {"new york mets", "mets", "ny mets", "nym"},
+        "NYY": {"new york yankees", "yankees", "ny yankees", "nyy"},
+        "ATH": {"athletics", "oakland athletics", "as", "ath", "oak"},
+        "PHI": {"philadelphia phillies", "phillies", "phi"},
+        "PIT": {"pittsburgh pirates", "pirates", "pit"},
+        "SD": {"san diego padres", "padres", "sd", "sdp"},
+        "SF": {"san francisco giants", "giants", "sf", "sfg"},
+        "SEA": {"seattle mariners", "mariners", "sea"},
+        "STL": {"st louis cardinals", "st. louis cardinals", "cardinals", "stl"},
+        "TB": {"tampa bay rays", "rays", "tb", "tbr"},
+        "TEX": {"texas rangers", "rangers", "tex"},
+        "TOR": {"toronto blue jays", "blue jays", "tor"},
+        "WSH": {"washington nationals", "nationals", "wsh", "was", "wsn"},
     },
 }
 
@@ -71,6 +93,7 @@ class ParsedTicker:
     strike: float = None
     side_code: str = ""
     player_code: str = ""
+    time_hhmm: str = ""
     family: MarketFamily = None
     notes: list = field(default_factory=list)
 
@@ -82,25 +105,47 @@ _MONTHS = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
 def _parse_date_teams(middle: str, league: str):
     match = re.match(r"(\d{2})([A-Z]{3})(\d{2})(\d{4})([A-Z]+?)(G\d)?$", middle)
     if not match:
-        return None, 1, ()
-    year2, month_abbr, day, _time, teams_blob, game_tag = match.groups()
+        return None, 1, (), ""
+    year2, month_abbr, day, start_time, teams_blob, game_tag = match.groups()
     if month_abbr not in _MONTHS:
-        return None, 1, ()
+        return None, 1, (), ""
     iso_date = f"20{year2}-{_MONTHS[month_abbr]:02d}-{int(day):02d}"
     game_number = int(game_tag[1:]) if game_tag else 1
     codes = _split_team_blob(teams_blob, league)
-    return iso_date, game_number, codes
+    return iso_date, game_number, codes, start_time
+
+
+def _ticker_code_map(league: str):
+    table = TEAM_ALIASES.get(league.lower(), {})
+    code_map = {}
+    for canonical, aliases in table.items():
+        code_map[canonical.upper()] = canonical
+        for alias in aliases:
+            if alias.isalpha() and 2 <= len(alias) <= 3:
+                code_map[alias.upper()] = canonical
+    return code_map
+
+
+def ticker_team_codes(league: str):
+    return _ticker_code_map(league)
+
+
+def ticker_codes_for(league: str, canonical_codes) -> set:
+    code_map = _ticker_code_map(league)
+    wanted = set(canonical_codes)
+    return {code for code, canonical in code_map.items()
+            if canonical in wanted} | wanted
 
 
 def _split_team_blob(blob: str, league: str):
-    table = TEAM_ALIASES.get(league.lower(), {})
-    known = sorted((code for code in table), key=len, reverse=True)
+    code_map = _ticker_code_map(league)
+    known = sorted(code_map, key=len, reverse=True)
     found = []
     remaining = blob
     while remaining:
         for code in known:
             if remaining.startswith(code):
-                found.append(code)
+                found.append(code_map[code])
                 remaining = remaining[len(code):]
                 break
         else:
@@ -119,17 +164,18 @@ def parse_ticker(ticker: str) -> ParsedTicker:
     parsed.league = parsed.family.league
 
     if len(parts) >= 2:
-        iso_date, game_number, codes = _parse_date_teams(parts[1],
-                                                         parsed.league)
+        iso_date, game_number, codes, start_time = _parse_date_teams(
+            parts[1], parsed.league)
         parsed.date = iso_date or ""
         parsed.game_number = game_number
         parsed.team_codes = codes
+        parsed.time_hhmm = start_time
         if iso_date is None:
             parsed.notes.append(f"could not parse date/teams from {parts[1]}")
 
     trailing = parts[2:]
     if parsed.family.has_player and trailing:
-        parsed.player_code = _player_from_segment(trailing[0], parsed.league)
+        parsed.player_code = trailing[0]
         trailing = trailing[1:]
 
     if parsed.family.has_strike:
@@ -148,11 +194,6 @@ def parse_ticker(ticker: str) -> ParsedTicker:
     return parsed
 
 
-def _player_from_segment(segment: str, league: str):
-    for code in TEAM_ALIASES.get(league.lower(), {}):
-        if segment.startswith(code):
-            return segment[len(code):]
-    return segment
 
 
 def _strike_from_suffix(suffix: str):
