@@ -52,11 +52,17 @@ def scan(args):
     if not known:
         print("no matchable markets found for those filters")
         return
-    print(f"scanning {len(known)} matchable markets "
-          f"({len(skipped)} skipped)...\n")
+    leagues = sorted({parsed.league for _ticker, parsed in known})
+    events = []
+    for league in leagues:
+        events.extend(fetch_sgo_events(league, args.search))
+    print(f"scanning {len(known)} matchable markets against "
+          f"{len(events)} SGO events ({len(skipped)} skipped, "
+          f"{len(leagues)} league(s), one SGO fetch per league)...\n")
+    crosswalk = _crosswalk()
     entries = []
-    for ticker, _parsed in known:
-        entry = propose(argparse.Namespace(ticker=ticker, search=args.search))
+    for ticker, parsed in known:
+        entry = propose_against(ticker, parsed, events, crosswalk)
         if entry is not None:
             entries.append(entry)
     config = {"defaults": {"size": 5, "max_inventory": 20, "gamma": 0.1,
@@ -76,7 +82,7 @@ def scan(args):
 
 
 def _persist_crosswalk():
-    crosswalk = getattr(propose, "_crosswalk", None)
+    crosswalk = getattr(_crosswalk, "_cache", None)
     if crosswalk:
         from player_crosswalk import save_crosswalk
         save_crosswalk(crosswalk)
@@ -103,14 +109,40 @@ def fetch_sgo_events(league, search):
     return events
 
 
+def _crosswalk():
+    cache = getattr(_crosswalk, "_cache", None)
+    if cache is None:
+        from player_crosswalk import load_crosswalk
+        cache = load_crosswalk()
+        _crosswalk._cache = cache
+    return cache
+
+
 def propose(args):
+    if "-" not in args.ticker:
+        print(f"'{args.ticker}' looks like a series prefix, not a full ticker.")
+        print(f"To match every market in that series, use scan:")
+        print(f"    python discover.py scan --series {args.ticker} --out draft.json")
+        print(f"To match one market, pass its full ticker, e.g.:")
+        print(f"    python discover.py propose {args.ticker}-<GAME>-<SUFFIX>")
+        return None
     parsed = parse_ticker(args.ticker)
-    print(f"\n=== {args.ticker} ===")
     if parsed.family is None:
+        print(f"\n=== {args.ticker} ===")
         print(f"  UNKNOWN market family '{parsed.prefix}'. Known families:")
         for family in MARKET_FAMILIES:
             print(f"    {family.kalshi_prefix}")
         return None
+    events = fetch_sgo_events(parsed.league, args.search)
+    if not events:
+        print(f"\n=== {args.ticker} ===")
+        print("  no SGO events returned for this league/search")
+        return None
+    return propose_against(args.ticker, parsed, events, _crosswalk())
+
+
+def propose_against(ticker, parsed, events, crosswalk):
+    print(f"\n=== {ticker} ===")
     print(f"  family : {parsed.family.description}")
     print(f"  parsed : date={parsed.date} game={parsed.game_number} "
           f"teams={'/'.join(parsed.team_codes)} strike={parsed.strike} "
@@ -118,10 +150,6 @@ def propose(args):
     for note in parsed.notes:
         print(f"  ! parse note: {note}")
 
-    events = fetch_sgo_events(parsed.league, args.search)
-    if not events:
-        print("  no SGO events returned for this league/search")
-        return None
     event_matches = rank_events(parsed, events)
     best_event = event_matches[0]
 
@@ -141,11 +169,6 @@ def propose(args):
     player_score = 1.0
     if parsed.family.has_player:
         from player_crosswalk import resolve_player
-        crosswalk = getattr(propose, "_crosswalk", None)
-        if crosswalk is None:
-            from player_crosswalk import load_crosswalk
-            crosswalk = load_crosswalk()
-            propose._crosswalk = crosswalk
         player_entity, player_score, player_source, player_concerns = \
             resolve_player(parsed.player_code, set(parsed.team_codes),
                            parsed.family.sgo_stat_id, event_odds, crosswalk)
@@ -175,7 +198,7 @@ def propose(args):
     print(f"\n  overall confidence: {overall}  "
           f"{'** NEEDS REVIEW **' if needs_review else 'looks clean'}")
 
-    entry = {"ticker": args.ticker,
+    entry = {"ticker": ticker,
              "sgo_event": best_event.sgo_event_id,
              "sgo_odd": odd.sgo_odd_id}
     if odd.sgo_line is not None:
@@ -189,9 +212,16 @@ def propose(args):
 
 
 def draft_config(args):
+    parsed_list = [(ticker, parse_ticker(ticker)) for ticker in args.tickers]
+    parsed_list = [(t, p) for t, p in parsed_list if p.family is not None]
+    leagues = sorted({p.league for _t, p in parsed_list})
+    events = []
+    for league in leagues:
+        events.extend(fetch_sgo_events(league, args.search))
+    crosswalk = _crosswalk()
     entries = []
-    for ticker in args.tickers:
-        entry = propose(argparse.Namespace(ticker=ticker, search=args.search))
+    for ticker, parsed in parsed_list:
+        entry = propose_against(ticker, parsed, events, crosswalk)
         if entry is not None:
             entries.append(entry)
     config = {"defaults": {"size": 5, "max_inventory": 20, "gamma": 0.1,
