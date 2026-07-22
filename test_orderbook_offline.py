@@ -524,6 +524,87 @@ def test_odd_side_inference():
           "invert+verify, settlement always flagged)")
 
 
+def test_scan_fetches_sgo_once():
+    import argparse, io, contextlib
+    import discover, kalshi
+    from market_catalog import TEAM_ALIASES
+    TEAM_ALIASES["mlb"].setdefault("PHI", {"philadelphia phillies", "phillies", "phi"})
+    original_get_markets = kalshi.KalshiClient.get_markets
+    kalshi.KalshiClient.get_markets = lambda self, **k: [
+        {"ticker": "KXMLBTOTAL-26JUL211840LADPHI-9"},
+        {"ticker": "KXMLBTOTAL-26JUL211840LADPHI-8"},
+        {"ticker": "KXMLBGAME-26JUL211840LADPHI-PHI"}]
+    calls = {"n": 0}
+    def counting_sgo(path, params):
+        calls["n"] += 1
+        return {"data": [{"eventID": "EV",
+            "teams": {"away": {"names": {"long": "Los Angeles Dodgers"}},
+                      "home": {"names": {"long": "Philadelphia Phillies"}}},
+            "status": {"startsAt": "2026-07-21T22:40:00Z"},
+            "odds": {"points-all-game-ou-over": {},
+                     "points-home-game-ml-home": {}}}]}
+    discover.sgo_get = counting_sgo
+    discover._crosswalk._cache = {}
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            discover.scan(argparse.Namespace(series="KXMLBTOTAL", event=None,
+                status="open", max=100, search=None, out=None, env=None))
+        assert calls["n"] == 1, f"expected 1 SGO fetch for 3 markets, got {calls['n']}"
+    finally:
+        kalshi.KalshiClient.get_markets = original_get_markets
+    print("PASS scan fetches SGO once for many markets (batched)")
+
+
+def test_propose_rejects_bare_prefix():
+    import argparse
+    import discover
+    result = discover.propose(argparse.Namespace(ticker="KXMLBHRR",
+                                                 search=None))
+    assert result is None
+    print("PASS propose rejects bare series prefix (redirects to scan)")
+
+
+def test_market_enumeration_pagination():
+    import kalshi
+    pages = [
+        {"markets": [{"ticker": f"KXMLBTOTAL-A-{i}"} for i in range(200)],
+         "cursor": "P2"},
+        {"markets": [{"ticker": f"KXMLBTOTAL-A-{i}"} for i in range(50)],
+         "cursor": None}]
+    cursors = []
+
+    client = kalshi.KalshiClient()
+    def fake_request(method, path, params=None, body=None, signed=False):
+        cursors.append(params.get("cursor"))
+        return pages[len(cursors) - 1]
+    client.request_json = fake_request
+    markets = client.get_markets(series_ticker="KXMLBTOTAL", status="open")
+    assert len(markets) == 250
+    assert cursors == [None, "P2"]
+
+    client2 = kalshi.KalshiClient()
+    client2.request_json = lambda *a, **k: {
+        "markets": [{"ticker": f"X-{i}"} for i in range(200)], "cursor": "GO"}
+    assert len(client2.get_markets(series_ticker="X", max_markets=100)) == 100
+    print("PASS market enumeration (cursor pagination, max cap)")
+
+
+def test_enumerate_filters_families():
+    import discover
+    import kalshi
+    client = kalshi.KalshiClient()
+    client.get_markets = lambda **k: [
+        {"ticker": "KXMLBTOTAL-26JUL191920LADNYY-9"},
+        {"ticker": "KXMLBGAME-26JUL191920LADNYY-NYY"},
+        {"ticker": "KXUNKNOWNTHING-foo"}]
+    known, skipped = discover.enumerate_markets(
+        client, "KXMLBTOTAL", None, "open", 500)
+    assert len(known) == 2 and len(skipped) == 1
+    assert skipped[0] == "KXUNKNOWNTHING-foo"
+    assert known[0][1].strike == 8.5
+    print("PASS enumerate filters (known families kept, unknown skipped)")
+
+
 def test_player_prop_flagged():
     from market_catalog import parse_ticker
     from odd_matcher import match_odd
@@ -531,7 +612,51 @@ def test_player_prop_flagged():
         "KXMLBHRR-26JUL191920LADNYYG2-LADMBETTS50-2"), {})
     assert prop.confidence <= 0.3
     assert any("hand" in c.lower() for c in prop.concerns)
-    print("PASS player prop flagged (low confidence, must-set-by-hand)")
+    print("PASS player prop flagged (low confidence when unresolved)")
+
+
+def test_player_code_decoding():
+    from player_codes import decode_player_code, name_similarity
+    teams = {"MIN", "CLE", "PHI", "LAD", "CHC"}
+    d = decode_player_code("PHIKSCHWARBER12", teams)
+    assert d.team == "PHI" and d.first_initial == "K"
+    assert d.last_name == "SCHWARBER" and d.number == "12"
+    d2 = decode_player_code("CHCPCROWARMSTRONG4", teams)
+    assert d2.last_name == "CROWARMSTRONG"
+    assert name_similarity(d2, "Pete Crow-Armstrong") == 1.0
+    d3 = decode_player_code("LADSOHTANI17", teams)
+    assert name_similarity(d3, "Shohei Ohtani") == 1.0
+    assert name_similarity(d3, "Mookie Betts") == 0.0
+    print("PASS player code decoding (team/initial/name/number, hyphen names)")
+
+
+def test_player_resolution_in_event():
+    from player_crosswalk import resolve_player, entity_ids_in_event
+    event_odds = {
+        "batting_hits+runs+rbi-SHOHEI_OHTANI_1_MLB-game-ou-over": {
+            "statEntityName": "Shohei Ohtani"},
+        "batting_hits+runs+rbi-KYLE_SCHWARBER_1_MLB-game-ou-over": {
+            "statEntityName": "Kyle Schwarber"},
+        "points-all-game-ou-over": {}}
+    stat = "batting_hits+runs+rbi"
+    harvested = entity_ids_in_event(event_odds, stat)
+    assert set(harvested) == {"SHOHEI_OHTANI_1_MLB", "KYLE_SCHWARBER_1_MLB"}
+
+    entity, score, source, _ = resolve_player(
+        "LADSOHTANI17", {"LAD", "PHI"}, stat, event_odds)
+    assert entity == "SHOHEI_OHTANI_1_MLB" and score == 1.0
+    assert source == "matched-in-event"
+
+    cached, cscore, csource, _ = resolve_player(
+        "LADSOHTANI17", {"LAD"}, stat, {},
+        crosswalk={"LADSOHTANI17": "SHOHEI_OHTANI_1_MLB"})
+    assert cached == "SHOHEI_OHTANI_1_MLB" and csource == "crosswalk"
+
+    missing, mscore, msource, mconcerns = resolve_player(
+        "MINBBUXTON25", {"MIN"}, stat, event_odds)
+    assert missing is None and mconcerns
+    print("PASS player resolution (event harvest, crosswalk cache, "
+          "no-fabrication when absent)")
 
 
 def main():
@@ -554,7 +679,13 @@ def main():
     test_ticker_parsing()
     test_event_ranking()
     test_odd_side_inference()
+    test_propose_rejects_bare_prefix()
+    test_scan_fetches_sgo_once()
+    test_market_enumeration_pagination()
+    test_enumerate_filters_families()
     test_player_prop_flagged()
+    test_player_code_decoding()
+    test_player_resolution_in_event()
     test_sgo_fair_value()
     test_sgo_strike_matching()
     test_sgo_shared_poll()
