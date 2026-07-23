@@ -203,8 +203,6 @@ def main():
     args = parser.parse_args()
     if bool(args.sgo_odd) != bool(args.sgo_event):
         raise SystemExit("--sgo-event and --sgo-odd must be given together")
-    if args.env:
-        kalshi.environment = args.env
     asyncio.run(run(args))
 
 
