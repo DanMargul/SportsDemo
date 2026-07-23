@@ -11,7 +11,7 @@ from dashboard_state import write_state, read_state
 from order_book import OrderBook
 from market_data_feed import MarketDataFeed
 from order_manager import OrderManager, fill_price_cents, fill_direction
-from quoting import EwmaVolatility, QuotePair, QuoteConfig, compute_quotes
+from quoting import VolatilityEWMA, QuotePair, QuoteConfig, compute_quotes
 
 
 def test_order_book():
@@ -75,8 +75,8 @@ def test_feed_dispatch():
 
 
 def test_ewma_volatility():
-    volatility = EwmaVolatility(half_life_seconds=60.0)
-    quiet = EwmaVolatility(half_life_seconds=60.0)
+    volatility = VolatilityEWMA(half_life_seconds=60.0)
+    quiet = VolatilityEWMA(half_life_seconds=60.0)
     price = 0.50
     for step in range(200):
         price += (0.02 if step % 2 else -0.02)
