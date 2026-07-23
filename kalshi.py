@@ -114,6 +114,28 @@ class KalshiClient:
         return self.request_json(method="GET",
                                  path=f"/markets/{ticker}").get("market", {})
 
+    def get_markets(self, *, series_ticker=None, event_ticker=None,
+                    status=None, max_markets=500):
+        collected = []
+        cursor = None
+        while len(collected) < max_markets:
+            params = {"limit": 200}
+            if series_ticker:
+                params["series_ticker"] = series_ticker
+            if event_ticker:
+                params["event_ticker"] = event_ticker
+            if status:
+                params["status"] = status
+            if cursor:
+                params["cursor"] = cursor
+            payload = self.request_json(method="GET", path="/markets",
+                                        params=params)
+            collected.extend(payload.get("markets", []))
+            cursor = payload.get("cursor")
+            if not cursor or not payload.get("markets"):
+                break
+        return collected[:max_markets]
+
     def get_orderbook(self, ticker, depth=50):
         return self.request_json(method="GET",
                                  path=f"/markets/{ticker}/orderbook",

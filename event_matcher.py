@@ -2,6 +2,28 @@ from dataclasses import dataclass, field
 
 from market_catalog import canonical_team, parse_iso_date
 
+EVENT_LOCAL_TIMEZONE = "America/New_York"
+
+
+def to_event_local(moment):
+    if moment is None:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        return moment.astimezone(ZoneInfo(EVENT_LOCAL_TIMEZONE))
+    except Exception:
+        return moment
+
+
+def start_time_gap_minutes(parsed_ticker, local_dt):
+    text = getattr(parsed_ticker, "time_hhmm", "")
+    if not text or len(text) != 4 or not text.isdigit() or local_dt is None:
+        return None
+    ticker_minutes = int(text[:2]) * 60 + int(text[2:])
+    local_minutes = local_dt.hour * 60 + local_dt.minute
+    gap = abs(ticker_minutes - local_minutes)
+    return min(gap, 24 * 60 - gap)
+
 
 @dataclass
 class EventMatch:
@@ -56,20 +78,34 @@ def score_event(parsed_ticker, sgo_event):
     sgo_start = (sgo_event.get("status", {}).get("startsAt")
                  or sgo_event.get("startsAt") or "")
     sgo_dt = parse_iso_date(sgo_start)
-    if ticker_date and sgo_dt is not None:
-        if sgo_dt.date().isoformat() == ticker_date:
+    local_dt = to_event_local(sgo_dt)
+    if ticker_date and local_dt is not None:
+        if local_dt.date().isoformat() == ticker_date:
             confidence += 0.3
-            evidence.append(f"date matches ({ticker_date})")
-        elif abs((sgo_dt.date() -
+            evidence.append(
+                f"date matches ({ticker_date} local, "
+                f"{sgo_dt.date().isoformat()} UTC)")
+            minutes_apart = start_time_gap_minutes(parsed_ticker, local_dt)
+            if minutes_apart is not None and minutes_apart <= 60:
+                confidence += 0.1
+                evidence.append(
+                    f"start time matches ({parsed_ticker.time_hhmm} local, "
+                    f"{minutes_apart:.0f}m apart)")
+            elif minutes_apart is not None:
+                concerns.append(
+                    f"start time differs by {minutes_apart:.0f}m from ticker "
+                    f"{parsed_ticker.time_hhmm} -- wrong game of a "
+                    f"doubleheader?")
+        elif abs((local_dt.date() -
                   parse_iso_date(ticker_date + "T00:00:00Z").date()).days) <= 1:
             confidence += 0.1
             concerns.append(
-                f"date off by a day: ticker {ticker_date} vs SGO "
-                f"{sgo_dt.date().isoformat()} (timezone boundary?)")
+                f"date off by a day even after local conversion: ticker "
+                f"{ticker_date} vs {local_dt.date().isoformat()}")
         else:
             concerns.append(
-                f"date mismatch: ticker {ticker_date} vs SGO "
-                f"{sgo_dt.date().isoformat()}")
+                f"date mismatch: ticker {ticker_date} vs "
+                f"{local_dt.date().isoformat()}")
     else:
         concerns.append("could not compare dates")
 
