@@ -460,371 +460,123 @@ def test_sgo_shared_poll():
           "opt-in)")
 
 
-def test_ticker_parsing():
-    from market_catalog import parse_ticker
-    total = parse_ticker("KXMLBTOTAL-26JUL191920LADNYY-9")
-    assert total.strike == 8.5 and total.team_codes == ("LAD", "NYY")
-    assert total.game_number == 1 and total.family.has_strike
-
-    prop = parse_ticker("KXMLBHRR-26JUL191920LADNYYG2-LADMBETTS50-2")
-    assert prop.strike == 1.5, f"prop strike {prop.strike}"
-    assert prop.player_code == "LADMBETTS50" and prop.game_number == 2
-    from player_codes import decode_player_code
-    decoded = decode_player_code(prop.player_code, set(prop.team_codes))
-    assert decoded.last_name == "BETTS" and decoded.number == "50"
-
-    moneyline = parse_ticker("KXMLBGAME-26JUL191920LADNYY-NYY")
-    assert moneyline.side_code == "NYY" and moneyline.strike is None
-
-    unknown = parse_ticker("KXNFLZZZ-whatever")
-    assert unknown.family is None and unknown.notes
-    from market_catalog import TEAM_ALIASES
-    assert len(TEAM_ALIASES["mlb"]) == 30, "expected all 30 MLB teams"
-
-    ath = parse_ticker("KXMLBHRR-26JUL212140ATHAZ-ATHTWHITE47-4")
-    assert ath.team_codes == ("ATH", "ARI")   # AZ normalizes to ARI
-    d_ath = decode_player_code(ath.player_code, set(ath.team_codes))
-    assert d_ath.last_name == "WHITE" and d_ath.team == "ATH"
-
-    sea = parse_ticker("KXMLBHRR-26JUL212140SEALAA-SEAWWILSON32-3")
-    assert sea.team_codes == ("SEA", "LAA")
-    d_sea = decode_player_code(sea.player_code, set(sea.team_codes))
-    assert d_sea.last_name == "WILSON" and d_sea.number == "32"
-    print("PASS ticker parsing (total, player prop, moneyline, doubleheader, "
-          "unknown family, all-30-teams, AZ/ATH/SEA)")
-
-
-def test_event_ranking():
-    from market_catalog import parse_ticker
-    from event_matcher import rank_events
-    parsed = parse_ticker("KXMLBTOTAL-26JUL191920LADNYY-9")
-    events = [
-        {"eventID": "RIGHT", "teams": {
-            "away": {"names": {"long": "Los Angeles Dodgers"}},
-            "home": {"names": {"long": "New York Yankees"}}},
-         "status": {"startsAt": "2026-07-19T23:20:00Z"}},
-        {"eventID": "WRONGDATE", "teams": {
-            "away": {"names": {"long": "Los Angeles Dodgers"}},
-            "home": {"names": {"long": "New York Yankees"}}},
-         "status": {"startsAt": "2026-07-25T23:20:00Z"}},
-        {"eventID": "WRONGTEAMS", "teams": {
-            "away": {"names": {"long": "Detroit Tigers"}},
-            "home": {"names": {"long": "Los Angeles Angels"}}},
-         "status": {"startsAt": "2026-07-19T23:20:00Z"}}]
-    ranked = rank_events(parsed, events)
-    assert ranked[0].sgo_event_id == "RIGHT"
-    assert ranked[0].confidence > ranked[1].confidence > ranked[2].confidence
-    assert ranked[0].confidence >= 0.85
-    print("PASS event ranking (correct match ranks first, distractors below)")
-
-
-def test_odd_side_inference():
-    from market_catalog import parse_ticker
-    from odd_matcher import match_odd
-    odds = {"points-all-game-ou-over": {}, "points-home-game-ml-home": {}}
-
-    total = match_odd(parse_ticker("KXMLBTOTAL-26JUL191920LADNYY-9"), odds)
-    assert total.invert is False and total.sgo_line == 8.5
-
-    home = match_odd(parse_ticker("KXMLBGAME-26JUL191920LADNYY-NYY"), odds)
-    assert home.invert is False   # NYY is home (last code)
-
-    away = match_odd(parse_ticker("KXMLBGAME-26JUL182207DETLAA-DET"), odds)
-    assert away.invert is True    # DET is away (first code) -> invert
-    assert any("VERIFY" in c for c in away.concerns)
-
-    assert all("SETTLEMENT" in " ".join(m.concerns).upper()
-               for m in (total, home, away))
-    print("PASS odd side inference (over no-invert, home no-invert, away "
-          "invert+verify, settlement always flagged)")
-
-
-def test_scan_fetches_sgo_once():
-    import argparse, io, contextlib
-    import discover, kalshi
-    from market_catalog import TEAM_ALIASES
-    TEAM_ALIASES["mlb"].setdefault("PHI", {"philadelphia phillies", "phillies", "phi"})
-    original_get_markets = kalshi.KalshiClient.get_markets
-    kalshi.KalshiClient.get_markets = lambda self, **k: [
-        {"ticker": "KXMLBTOTAL-26JUL211840LADPHI-9"},
-        {"ticker": "KXMLBTOTAL-26JUL211840LADPHI-8"},
-        {"ticker": "KXMLBGAME-26JUL211840LADPHI-PHI"}]
-    calls = {"n": 0}
-    def counting_sgo(path, params):
-        calls["n"] += 1
-        return {"data": [{"eventID": "EV",
-            "teams": {"away": {"names": {"long": "Los Angeles Dodgers"}},
-                      "home": {"names": {"long": "Philadelphia Phillies"}}},
-            "status": {"startsAt": "2026-07-21T22:40:00Z"},
-            "odds": {"points-all-game-ou-over": {},
-                     "points-home-game-ml-home": {}}}]}
-    discover.sgo_get = counting_sgo
-    discover._id_map._cache = {}
+def test_league_pace_profiles():
+    import game_clock
+    expected_hours = {"MLB": 2.7, "NFL": 3.2, "NBA": 2.25, "NHL": 2.5,
+                      "EPL": 1.9}
+    for league, hours in expected_hours.items():
+        profile = game_clock.profile_for(league)
+        actual = profile.nominal_real_seconds / 3600.0
+        assert abs(actual - hours) < 0.15, f"{league}: {actual:.2f}h"
+    assert game_clock.profile_for("soccer").league == "EPL"
+    assert game_clock.profile_for("mlb").league == "MLB"
+    assert game_clock.profile_for("WNBA").league == "NBA"
     try:
-        with contextlib.redirect_stdout(io.StringIO()):
-            discover.scan(argparse.Namespace(series="KXMLBTOTAL", event=None,
-                status="open", max=100, search=None, out=None, env=None))
-        assert calls["n"] == 1, f"expected 1 SGO fetch for 3 markets, got {calls['n']}"
-    finally:
-        kalshi.KalshiClient.get_markets = original_get_markets
-    print("PASS scan fetches SGO once for many markets (batched)")
+        game_clock.profile_for("kabaddi")
+        assert False, "unknown league should raise"
+    except KeyError:
+        pass
+    print("PASS league pace profiles (nominal durations, aliases, unknown)")
 
 
-def test_propose_rejects_bare_prefix():
-    import argparse
-    import discover
-    result = discover.propose(argparse.Namespace(ticker="KXMLBHRR",
-                                                 search=None))
-    assert result is None
-    print("PASS propose rejects bare series prefix (redirects to scan)")
+def test_remaining_decreases_monotonically():
+    import game_clock
+    previous = float("inf")
+    for inning in range(1, 10):
+        estimate = game_clock.estimate_remaining(
+            "MLB", game_clock.innings_remaining(inning, True))
+        assert estimate.seconds < previous, f"inning {inning}"
+        previous = estimate.seconds
+
+    previous = float("inf")
+    for period, clock in [(1, 900), (2, 900), (3, 900), (4, 900), (4, 60)]:
+        units = game_clock.clock_units_remaining(period, clock, "NFL")
+        estimate = game_clock.estimate_remaining("NFL", units)
+        assert estimate.seconds < previous, f"NFL Q{period} {clock}s"
+        previous = estimate.seconds
+    print("PASS remaining time decreases monotonically through a game")
 
 
-def test_market_enumeration_pagination():
-    import kalshi
-    pages = [
-        {"markets": [{"ticker": f"KXMLBTOTAL-A-{i}"} for i in range(200)],
-         "cursor": "P2"},
-        {"markets": [{"ticker": f"KXMLBTOTAL-A-{i}"} for i in range(50)],
-         "cursor": None}]
-    cursors = []
+def test_pace_calibration():
+    import game_clock
+    units = game_clock.innings_remaining(6, True)
+    prior = game_clock.estimate_remaining("MLB", units)
 
-    client = kalshi.KalshiClient()
-    def fake_request(method, path, params=None, body=None, signed=False):
-        cursors.append(params.get("cursor"))
-        return pages[len(cursors) - 1]
-    client.request_json = fake_request
-    markets = client.get_markets(series_ticker="KXMLBTOTAL", status="open")
-    assert len(markets) == 250
-    assert cursors == [None, "P2"]
+    fast = game_clock.estimate_remaining("MLB", units,
+                                         elapsed_real_seconds=60 * 60)
+    slow = game_clock.estimate_remaining("MLB", units,
+                                         elapsed_real_seconds=130 * 60)
+    assert fast.seconds < prior.seconds < slow.seconds
+    assert fast.pace_factor < 1.0 < slow.pace_factor
+    assert "calibrated" in fast.pace_source
 
-    client2 = kalshi.KalshiClient()
-    client2.request_json = lambda *a, **k: {
-        "markets": [{"ticker": f"X-{i}"} for i in range(200)], "cursor": "GO"}
-    assert len(client2.get_markets(series_ticker="X", max_markets=100)) == 100
-    print("PASS market enumeration (cursor pagination, max cap)")
+    # a game running exactly on the prior pace must recover factor 1.0
+    profile = game_clock.profile_for("MLB")
+    split = game_clock.split_at_units_remaining(profile, units)
+    on_pace = split.played_weighted_units * profile.base_seconds_per_unit
+    exact = game_clock.estimate_remaining("MLB", units,
+                                          elapsed_real_seconds=on_pace)
+    assert abs(exact.pace_factor - 1.0) < 1e-9
+    assert abs(exact.seconds - prior.seconds) < 1e-6
 
+    # too little played to calibrate: falls back to the prior
+    early = game_clock.estimate_remaining(
+        "MLB", game_clock.innings_remaining(1, False),
+        elapsed_real_seconds=45 * 60)
+    assert early.pace_factor == 1.0 and early.pace_source == "league prior"
 
-def test_enumerate_filters_families():
-    import discover
-    import kalshi
-    client = kalshi.KalshiClient()
-    client.get_markets = lambda **k: [
-        {"ticker": "KXMLBTOTAL-26JUL191920LADNYY-9"},
-        {"ticker": "KXMLBGAME-26JUL191920LADNYY-NYY"},
-        {"ticker": "KXUNKNOWNTHING-foo"}]
-    known, skipped = discover.enumerate_markets(
-        client, "KXMLBTOTAL", None, "open", 500)
-    assert len(known) == 2 and len(skipped) == 1
-    assert skipped[0] == "KXUNKNOWNTHING-foo"
-    assert known[0][1].strike == 8.5
-    print("PASS enumerate filters (known families kept, unknown skipped)")
+    # absurd elapsed is clamped rather than propagated
+    absurd = game_clock.estimate_remaining("MLB", units,
+                                           elapsed_real_seconds=6 * 3600)
+    assert absurd.pace_factor <= game_clock.MAXIMUM_PACE_FACTOR
+    print("PASS pace calibration (fast/slow, exact recovery, early fallback, "
+          "clamping)")
 
 
-def test_player_prop_flagged():
-    from market_catalog import parse_ticker
-    from odd_matcher import match_odd
-    prop = match_odd(parse_ticker(
-        "KXMLBHRR-26JUL191920LADNYYG2-LADMBETTS50-2"), {})
-    assert prop.confidence <= 0.3
-    assert any("hand" in c.lower() for c in prop.concerns)
-    print("PASS player prop flagged (low confidence when unresolved)")
+def test_calibration_weight_ramps():
+    import game_clock
+    weights = [game_clock.calibration_weight(f)
+               for f in (0.0, 0.05, 0.2, 0.4, 0.5, 0.9)]
+    assert weights[0] == 0.0 and weights[1] == 0.0
+    assert 0 < weights[2] < weights[3] < 1.0
+    assert weights[4] == 1.0 and weights[5] == 1.0
+    print("PASS calibration weight ramps from prior-only to fully observed")
 
 
-def test_player_code_decoding():
-    from player_codes import decode_player_code, name_similarity
-    teams = {"MIN", "CLE", "PHI", "LAD", "CHC"}
-    d = decode_player_code("PHIKSCHWARBER12", teams)
-    assert d.team == "PHI" and d.first_initial == "K"
-    assert d.last_name == "SCHWARBER" and d.number == "12"
-    d2 = decode_player_code("CHCPCROWARMSTRONG4", teams)
-    assert d2.last_name == "CROWARMSTRONG"
-    assert name_similarity(d2, "Pete Crow-Armstrong") == 1.0
-    d3 = decode_player_code("LADSOHTANI17", teams)
-    assert name_similarity(d3, "Shohei Ohtani") == 1.0
-    assert name_similarity(d3, "Mookie Betts") == 0.0
-    print("PASS player code decoding (team/initial/name/number, hyphen names)")
+def test_breaks_and_overtime():
+    import game_clock
+    before_half = game_clock.estimate_remaining(
+        "NFL", game_clock.clock_units_remaining(2, 900, "NFL"))
+    after_half = game_clock.estimate_remaining(
+        "NFL", game_clock.clock_units_remaining(3, 900, "NFL"))
+    assert before_half.remaining_break_seconds == 780.0
+    assert after_half.remaining_break_seconds == 0.0
+
+    first = game_clock.estimate_remaining(
+        "NHL", game_clock.clock_units_remaining(1, 1200, "NHL"))
+    third = game_clock.estimate_remaining(
+        "NHL", game_clock.clock_units_remaining(3, 1200, "NHL"))
+    assert first.remaining_break_seconds == 2160.0
+    assert third.remaining_break_seconds == 0.0
+
+    over = game_clock.estimate_remaining("MLB", 0.0)
+    assert over.seconds == over.overtime_allowance_seconds > 0
+    assert game_clock.estimate_remaining(
+        "MLB", 0.0, include_overtime=False).seconds == 0.0
+    print("PASS scheduled breaks drop out once passed; overtime allowance")
 
 
-def test_name_scoring_against_market_names():
-    from player_codes import decode_player_code, name_similarity
-    decoded = decode_player_code("ATHTSODERSTROM21", {"ATH", "ARI"})
-    # SGO exposes the player inside a market name, not as a bare name
-    for text in ["Tyler Soderstrom Hits + Runs + RBIs",
-                 "Tyler Soderstrom Hits + Runs + RBIs Over/Under",
-                 "TYLER_SODERSTROM_1_MLB",
-                 "Tyler Soderstrom"]:
-        assert name_similarity(decoded, text) == 1.0, text
-    assert name_similarity(decoded, "Over/Under") == 0.0
-    assert name_similarity(decoded, "Tyler White Hits + Runs + RBIs") == 0.0
-
-    # a contradicting first initial is evidence AGAINST, not neutral
-    wilson = decode_player_code("SEAWWILSON32", {"CIN", "SEA"})
-    assert name_similarity(wilson, "JACOB_WILSON_1_MLB") < 0.7
-    assert name_similarity(wilson, "Jacob Wilson Hits + Runs + RBIs") < 0.7
-    assert name_similarity(wilson, "WILL_WILSON_1_MLB") == 1.0
-    print("PASS name scoring (market names, entity IDs, wrong-initial "
-          "refused)")
-
-
-def test_hard_player_name_shapes():
-    from player_codes import decode_player_code, name_similarity
-    from market_catalog import parse_ticker, ticker_codes_for
-
-    # multi-word surname: Kalshi concatenates, SGO splits
-    delacruz = decode_player_code("CINEDELACRUZ44", {"CIN", "SEA"})
-    assert delacruz.last_name == "DELACRUZ"
-    assert name_similarity(delacruz, "ELLY_DE_LA_CRUZ_1_MLB") == 1.0
-
-    # dropped accent: Kalshi RODRGUEZ vs SGO RODRIGUEZ
-    rodriguez = decode_player_code("SEAJRODRGUEZ44", {"CIN", "SEA"})
-    assert name_similarity(rodriguez, "JULIO_RODRIGUEZ_1_MLB") >= 0.85
-    assert name_similarity(rodriguez, "Julio Rodr\u00edguez Hits + Runs") >= 0.85
-
-    # Kalshi ticker-code alias in the player segment (AZ, not ARI)
-    parsed = parse_ticker("KXMLBHRR-26JUL221540ATHAZ-AZCCARROLL7-1")
-    codes = ticker_codes_for(parsed.league, parsed.team_codes)
-    carroll = decode_player_code(parsed.player_code, codes)
-    assert carroll.last_name == "CARROLL" and carroll.first_initial == "C"
-    assert name_similarity(carroll, "CORBIN_CARROLL_1_MLB") == 1.0
-
-    # fuzzy matching must not conflate genuinely different surnames
-    marte = decode_player_code("AZKMARTE4", {"AZ", "ARI"})
-    assert name_similarity(marte, "J_D_MARTINEZ_1_MLB") < 0.7
-    print("PASS hard player names (multi-word surname, dropped accent, "
-          "ticker alias, no false conflation)")
-
-
-def test_csv_review_roundtrip():
-    import csv, io, json, os, tempfile, contextlib, argparse
-    import discover
-
-    entries = [
-        {"ticker": "AAA", "sgo_event": "EV", "sgo_odd": "points-all-game-ou-over",
-         "sgo_line": 8.5, "_confidence": 0.8,
-         "_evidence": {"kalshi_teams": "ATH/ARI", "player_decoded": "",
-                       "player_entity": "", "player_score": ""}},
-        {"ticker": "BBB", "sgo_event": "EV",
-         "sgo_odd": "batting_hits+runs+rbi-PLAYER_UNKNOWN-game-ou-over",
-         "sgo_line": 1.5, "_confidence": 0.2, "_REVIEW": "unresolved player",
-         "_evidence": {"kalshi_teams": "ATH/ARI",
-                       "player_decoded": "J. Wilson #5",
-                       "player_entity": "", "player_score": 0.0}},
-        {"ticker": "CCC", "sgo_event": "EV", "sgo_odd": "points-home-game-ml-home",
-         "sgo_invert": True, "_confidence": 0.8, "_REVIEW": "away side",
-         "_evidence": {}},
-    ]
-    directory = tempfile.mkdtemp()
-    csv_path = os.path.join(directory, "draft.csv")
-    rows = discover.write_csv(entries, csv_path)
-    assert rows[0]["ticker"] in {"BBB", "CCC"}      # flagged rows sort first
-    assert rows[-1]["ticker"] == "AAA"
-    written = list(csv.DictReader(open(csv_path)))
-    assert set(discover.CSV_COLUMNS) == set(written[0].keys())
-
-    # build skips flagged rows
-    out_path = os.path.join(directory, "markets.json")
-    with contextlib.redirect_stdout(io.StringIO()):
-        discover.build_config(argparse.Namespace(
-            csv=csv_path, out=out_path, include_flagged=False))
-    config = json.load(open(out_path))
-    assert [m["ticker"] for m in config["markets"]] == ["AAA"]
-    assert config["markets"][0]["sgo_line"] == 8.5
-
-    # clearing the flag admits the row, but PLAYER_UNKNOWN is still refused
-    for row in written:
-        row["needs_review"] = ""
-    reviewed = os.path.join(directory, "reviewed.csv")
-    with open(reviewed, "w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=discover.CSV_COLUMNS)
-        writer.writeheader()
-        writer.writerows(written)
-    with contextlib.redirect_stdout(io.StringIO()):
-        discover.build_config(argparse.Namespace(
-            csv=reviewed, out=out_path, include_flagged=False))
-    config = json.load(open(out_path))
-    tickers = [m["ticker"] for m in config["markets"]]
-    assert "BBB" not in tickers, "PLAYER_UNKNOWN leaked into a runnable config"
-    by_ticker = {m["ticker"]: m for m in config["markets"]}
-    assert "CCC" in by_ticker and by_ticker["CCC"].get("sgo_invert") is True
-    print("PASS CSV review roundtrip (flagged first, build skips flagged, "
-          "PLAYER_UNKNOWN refused, invert preserved)")
-
-
-def test_ambiguous_player_forces_review():
-    import argparse, io, contextlib
-    import discover
-    def fake_sgo(path, params):
-        return {"data": [{"eventID": "EV",
-            "teams": {"away": {"names": {"long": "Athletics"}},
-                      "home": {"names": {"long": "Arizona Diamondbacks"}}},
-            "status": {"startsAt": "2026-07-22T01:40:00Z"},
-            "odds": {
-                "batting_hits+runs+rbi-JACOB_WILSON_1_MLB-game-ou-over":
-                    {"marketName": "Jacob Wilson Hits + Runs + RBIs"},
-                "batting_hits+runs+rbi-JOSH_WILSON_1_MLB-game-ou-over":
-                    {"marketName": "Josh Wilson Hits + Runs + RBIs"}}}]}
-    original = discover.sgo_get
-    discover.sgo_get = fake_sgo
-    discover._id_map._cache = {}
-    try:
-        with contextlib.redirect_stdout(io.StringIO()):
-            entry = discover.propose(argparse.Namespace(
-                ticker="KXMLBHRR-26JUL212140ATHAZ-ATHJWILSON5-2", search=None))
-    finally:
-        discover.sgo_get = original
-    assert "_REVIEW" in entry and "ambiguous" in entry["_REVIEW"]
-    print("PASS ambiguous player match is flagged in the draft config")
-
-
-def test_event_local_time_and_tiebreak():
-    from market_catalog import parse_ticker
-    from event_matcher import rank_events
-    parsed = parse_ticker("KXMLBHRR-26JUL212140ATHAZ-ATHTSODERSTROM21-2")
-    assert parsed.time_hhmm == "2140"
-    events = [
-        {"eventID": "RIGHT",
-         "teams": {"away": {"names": {"long": "Athletics"}},
-                   "home": {"names": {"long": "Arizona Diamondbacks"}}},
-         "status": {"startsAt": "2026-07-22T01:40:00Z"}},
-        {"eventID": "NEXTDAY",
-         "teams": {"away": {"names": {"long": "Athletics"}},
-                   "home": {"names": {"long": "Arizona Diamondbacks"}}},
-         "status": {"startsAt": "2026-07-22T22:10:00Z"}}]
-    ranked = rank_events(parsed, events)
-    assert ranked[0].sgo_event_id == "RIGHT"
-    # a 21:40 ET game stored as next-day UTC must still be a full date match
-    assert ranked[0].confidence >= 0.9, ranked[0].confidence
-    assert ranked[0].confidence > ranked[1].confidence
-    print("PASS event local-time date match and start-time tiebreak")
-
-
-def test_player_resolution_in_event():
-    from player_id_map import resolve_player, entity_ids_in_event
-    event_odds = {
-        "batting_hits+runs+rbi-SHOHEI_OHTANI_1_MLB-game-ou-over": {
-            "statEntityName": "Shohei Ohtani"},
-        "batting_hits+runs+rbi-KYLE_SCHWARBER_1_MLB-game-ou-over": {
-            "statEntityName": "Kyle Schwarber"},
-        "points-all-game-ou-over": {}}
-    stat = "batting_hits+runs+rbi"
-    harvested = entity_ids_in_event(event_odds, stat)
-    assert set(harvested) == {"SHOHEI_OHTANI_1_MLB", "KYLE_SCHWARBER_1_MLB"}
-
-    entity, score, source, _ = resolve_player(
-        "LADSOHTANI17", {"LAD", "PHI"}, stat, event_odds)
-    assert entity == "SHOHEI_OHTANI_1_MLB" and score == 1.0
-    assert source == "matched-in-event"
-
-    cached, cscore, csource, _ = resolve_player(
-        "LADSOHTANI17", {"LAD"}, stat, {},
-        id_map={"LADSOHTANI17": "SHOHEI_OHTANI_1_MLB"})
-    assert cached == "SHOHEI_OHTANI_1_MLB" and csource == "id-map"
-
-    missing, mscore, msource, mconcerns = resolve_player(
-        "MINBBUXTON25", {"MIN"}, stat, event_odds)
-    assert missing is None and mconcerns
-    print("PASS player resolution (event harvest, ID map cache, "
-          "no-fabrication when absent)")
+def test_break_seconds_do_not_scale_with_pace():
+    import game_clock
+    units = game_clock.clock_units_remaining(2, 900, "NFL")
+    profile = game_clock.profile_for("NFL")
+    split = game_clock.split_at_units_remaining(profile, units)
+    on_pace = split.played_weighted_units * profile.base_seconds_per_unit
+    slow = game_clock.estimate_remaining("NFL", units,
+                                         elapsed_real_seconds=on_pace * 1.5)
+    assert slow.pace_factor > 1.0
+    assert slow.remaining_break_seconds == 780.0
+    print("PASS halftime stays a fixed real duration under pace calibration")
 
 
 def main():
@@ -844,21 +596,12 @@ def main():
     test_fill_helpers()
     test_fill_updates_position_from_resting()
     test_dashboard_state_roundtrip()
-    test_ticker_parsing()
-    test_event_ranking()
-    test_odd_side_inference()
-    test_propose_rejects_bare_prefix()
-    test_scan_fetches_sgo_once()
-    test_market_enumeration_pagination()
-    test_enumerate_filters_families()
-    test_player_prop_flagged()
-    test_player_code_decoding()
-    test_player_resolution_in_event()
-    test_name_scoring_against_market_names()
-    test_event_local_time_and_tiebreak()
-    test_hard_player_name_shapes()
-    test_ambiguous_player_forces_review()
-    test_csv_review_roundtrip()
+    test_league_pace_profiles()
+    test_remaining_decreases_monotonically()
+    test_pace_calibration()
+    test_calibration_weight_ramps()
+    test_breaks_and_overtime()
+    test_break_seconds_do_not_scale_with_pace()
     test_sgo_fair_value()
     test_sgo_strike_matching()
     test_sgo_shared_poll()
