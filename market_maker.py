@@ -29,9 +29,6 @@ def recent_log_lines():
 
 
 async def run(args):
-    if args.env:
-        kalshi.environment = args.env
-
     client = kalshi.KalshiClient()
     exchange = client.get_exchange_status()
     if not exchange.get("trading_active"):
@@ -203,6 +200,8 @@ def main():
     args = parser.parse_args()
     if bool(args.sgo_odd) != bool(args.sgo_event):
         raise SystemExit("--sgo-event and --sgo-odd must be given together")
+    if args.env:
+        kalshi.environment = args.env
     asyncio.run(run(args))
 
 
