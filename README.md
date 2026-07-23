@@ -37,11 +37,12 @@ The session can be visualized if `python market_maker.py` is run with the argume
 * Quote generation based on model of Avellaneda & Stoikov
 * Sharp-book derived fair odds with SportsGameOdds poller
 * Visualization of live session via dashboard
+* Automated discovery and matching of Kalshi 'tickers' and SportsGameOdds 'odd IDs'
 
 ## Future
 * More Documentation
-* Automated discovery and matching of Kalshi 'tickers' and SportsGameOdds 'odd IDs'
 * Infrastructure for trading on multiple markets simultaneously (dashboard update as well?)
+* Improve estimate of time-to-close; Kalshi markets for events can close days after end of game.
 * (Research) Derive inter-market correlation factors from historical data
 * Trade on Polymarket (other prediction markets?)
 
