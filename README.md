@@ -41,6 +41,7 @@ The session can be visualized if `python market_maker.py` is run with the argume
 
 ## Future
 * More Documentation
+* ETL with Postgresql
 * Infrastructure for trading on multiple markets simultaneously (dashboard update as well?)
 * Improve estimate of time-to-close; Kalshi markets for events can close days after end of game.
 * (Research) Derive inter-market correlation factors from historical data
