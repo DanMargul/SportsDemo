@@ -1,5 +1,6 @@
 import re
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 
 
 @dataclass
@@ -49,39 +50,53 @@ def name_similarity(decoded: DecodedPlayer, full_name: str) -> float:
     tokens = name_tokens(full_name)
     if not tokens or not decoded.last_name:
         return 0.0
-    last_name = decoded.last_name
-    exact_index, fuzzy = _locate_surname(tokens, last_name)
-    if exact_index is not None:
-        return round(_first_initial_adjustment(decoded, tokens, exact_index,
-                                               0.7), 3)
-    if fuzzy is not None:
-        _ratio, fuzzy_index = fuzzy
-        return round(_first_initial_adjustment(decoded, tokens, fuzzy_index,
-                                               0.6), 3)
-    return 0.0
+    match = _locate_surname(tokens, decoded.last_name)
+    if match is None:
+        return 0.0
+    return round(_first_initial_adjustment(decoded, tokens, match.index,
+                                           match.base_score), 3)
 
 
 SURNAME_NEAR_MATCH_RATIO = 0.85
 MAX_SURNAME_TOKENS = 4
+EXACT_SURNAME_SCORE = 0.7
+NEAR_SURNAME_SCORE = 0.6
 
 
-def _locate_surname(tokens, last_name):
-    # TODO Reduce cognitive complexity
-    from difflib import SequenceMatcher
-    best_fuzzy = None
+@dataclass
+class SurnameMatch:
+    index: int
+    exact: bool
+
+    @property
+    def base_score(self) -> float:
+        return EXACT_SURNAME_SCORE if self.exact else NEAR_SURNAME_SCORE
+
+
+def _candidate_surnames(tokens):
     for start in range(len(tokens)):
         for span in range(1, min(MAX_SURNAME_TOKENS,
                                  len(tokens) - start) + 1):
-            joined = "".join(tokens[start:start + span])
-            if joined == last_name:
-                return start, None
-            if len(joined) < 4:
-                continue
-            ratio = SequenceMatcher(None, joined, last_name).ratio()
-            if ratio >= SURNAME_NEAR_MATCH_RATIO and (
-                    best_fuzzy is None or ratio > best_fuzzy[0]):
-                best_fuzzy = (ratio, start)
-    return None, best_fuzzy
+            yield start, "".join(tokens[start:start + span])
+
+
+def _locate_surname(tokens, last_name):
+    for start, joined in _candidate_surnames(tokens):
+        if joined == last_name:
+            return SurnameMatch(start, exact=True)
+    return _best_near_surname(tokens, last_name)
+
+
+def _best_near_surname(tokens, last_name):
+    scored = [(SequenceMatcher(None, joined, last_name).ratio(), start)
+              for start, joined in _candidate_surnames(tokens)
+              if len(joined) >= 4]
+    if not scored:
+        return None
+    ratio, start = max(scored)
+    if ratio < SURNAME_NEAR_MATCH_RATIO:
+        return None
+    return SurnameMatch(start, exact=False)
 
 
 def _first_initial_adjustment(decoded, tokens, surname_index, base_score):

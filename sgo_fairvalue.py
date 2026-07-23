@@ -35,7 +35,7 @@ def events_in(payload) -> list:
     return []
 
 
-class WatcherSGO:
+class SgoOddWatch:
     def __init__(self, event_id: str, odd_id: str,
                  max_age_seconds: float = 45.0, invert: bool = False,
                  strike_line=None):
@@ -43,9 +43,7 @@ class WatcherSGO:
         self.odd_id = odd_id
         self.max_age_seconds = max_age_seconds
         self.invert = invert
-        self.strike_line = float(strike_line) \
-            if strike_line is not None \
-            else None
+        self.strike_line = float(strike_line) if strike_line is not None else None
         self.fair_probability = None
         self.consensus_line = None
         self.market_name = ""
@@ -85,16 +83,12 @@ class WatcherSGO:
                                or odd.get("bookOverUnder"))
         if odd.get("cancelled") or odd.get("ended"):
             self.fair_probability = None
-            log.warning("SGO odd %s is %s",
-                        self.odd_id,
-                        "cancelled"
-                        if odd.get("cancelled")
-                        else "ended")
+            log.warning("SGO odd %s is %s", self.odd_id,
+                        "cancelled" if odd.get("cancelled") else "ended")
             return
         probability = self._fair_probability_from(odd, event_odds)
         if probability is not None:
-            self.fair_probability = (1.0 - probability
-                                     if self.invert
+            self.fair_probability = ((1.0 - probability) if self.invert
                                      else probability)
             self.updated_at = time.time()
 
@@ -107,8 +101,7 @@ class WatcherSGO:
             self.source = "fairOdds"
             return devig.implied_probability(odd["fairOdds"])
         consensus = (odd.get("bookOdds")
-                     if odd.get("bookOddsAvailable", True)
-                     else None)
+                     if odd.get("bookOddsAvailable", True) else None)
         opposing_consensus = (opposing_odd.get("bookOdds")
                               if opposing_odd.get("bookOddsAvailable", True)
                               else None)
@@ -121,52 +114,71 @@ class WatcherSGO:
         return None
 
     def _fair_at_strike(self, odd: dict, opposing_odd: dict):
-        # TODO Reduce cognitive complexity
-        strike = self.strike_line
-        consensus_line = odd.get("fairOverUnder")
-        if (consensus_line is not None
-                and abs(float(consensus_line) - strike) < 1e-9
-                and odd.get("fairOdds") is not None
-                and odd.get("fairOddsAvailable", True)):
-            self.source = f"fairOdds@{consensus_line}"
-            self.consensus_line = consensus_line
+        if self._consensus_covers_strike(odd):
+            self.source = f"fairOdds@{odd['fairOverUnder']}"
+            self.consensus_line = odd["fairOverUnder"]
             return devig.implied_probability(odd["fairOdds"])
-        our_side = self._bookmaker_odds_at_strike(odd, strike)
-        opposing_side = self._bookmaker_odds_at_strike(opposing_odd, strike)
-        per_book_fairs = [
-            devig.remove_vig([our_side[bookmaker], opposing_side[bookmaker]],
-                             "power")[0][0]
-            for bookmaker in our_side if bookmaker in opposing_side]
+
+        per_book_fairs = self._devigged_fairs_at_strike(odd, opposing_odd)
         if not per_book_fairs:
-            lines_seen = set()
-            for side in (odd, opposing_odd):
-                for quote in (side.get("byBookmaker") or {}).values():
-                    for candidate in [quote] + list(quote.get("altLines") or []):
-                        if candidate.get("overUnder") is not None:
-                            lines_seen.add(str(candidate["overUnder"]))
             log.warning("no bookmaker offers line %g on %s (lines seen: %s)",
-                        strike, self.odd_id,
-                        ", ".join(sorted(lines_seen)) or "none")
+                        self.strike_line, self.odd_id,
+                        ", ".join(lines_offered(odd, opposing_odd)) or "none")
             return None
-        self.source = f"altLines@{strike:g} ({len(per_book_fairs)} books)"
-        self.consensus_line = f"{strike:g}"
+
+        self.source = (f"altLines@{self.strike_line:g} "
+                       f"({len(per_book_fairs)} books)")
+        self.consensus_line = f"{self.strike_line:g}"
         return statistics.median(per_book_fairs)
 
-    @staticmethod
-    def _bookmaker_odds_at_strike(odd: dict, strike: float) -> dict:
-        odds_by_bookmaker = {}
-        for bookmaker, quote in (odd.get("byBookmaker") or {}).items():
-            for candidate in [quote] + list(quote.get("altLines") or []):
-                candidate_line = candidate.get("overUnder")
-                if (candidate_line is not None and candidate.get("available")
-                        and candidate.get("odds") is not None
-                        and abs(float(candidate_line) - strike) < 1e-9):
-                    odds_by_bookmaker[bookmaker] = candidate["odds"]
-                    break
-        return odds_by_bookmaker
+    def _consensus_covers_strike(self, odd: dict) -> bool:
+        line = odd.get("fairOverUnder")
+        return (line is not None
+                and same_line(line, self.strike_line)
+                and odd.get("fairOdds") is not None
+                and odd.get("fairOddsAvailable", True))
+
+    def _devigged_fairs_at_strike(self, odd: dict, opposing_odd: dict) -> list:
+        ours = bookmaker_odds_at_strike(odd, self.strike_line)
+        theirs = bookmaker_odds_at_strike(opposing_odd, self.strike_line)
+        return [devig.remove_vig([ours[book], theirs[book]], "power")[0][0]
+                for book in ours if book in theirs]
 
 
-class EventPollerSGO:
+def same_line(line, strike) -> bool:
+    return abs(float(line) - float(strike)) < 1e-9
+
+
+def quote_variants(quote: dict) -> list:
+    return [quote] + list(quote.get("altLines") or [])
+
+
+def offers_line(candidate: dict, strike) -> bool:
+    return (candidate.get("overUnder") is not None
+            and candidate.get("available")
+            and candidate.get("odds") is not None
+            and same_line(candidate["overUnder"], strike))
+
+
+def bookmaker_odds_at_strike(odd: dict, strike) -> dict:
+    matched = {}
+    for bookmaker, quote in (odd.get("byBookmaker") or {}).items():
+        offered = next((candidate["odds"] for candidate in quote_variants(quote)
+                        if offers_line(candidate, strike)), None)
+        if offered is not None:
+            matched[bookmaker] = offered
+    return matched
+
+
+def lines_offered(*odds) -> list:
+    return sorted({str(candidate["overUnder"])
+                   for odd in odds
+                   for quote in (odd.get("byBookmaker") or {}).values()
+                   for candidate in quote_variants(quote)
+                   if candidate.get("overUnder") is not None})
+
+
+class SgoEventPoller:
     def __init__(self, event_id: str, poll_seconds: float = 10.0):
         self.event_id = event_id
         self.poll_seconds = poll_seconds
@@ -174,16 +186,31 @@ class EventPollerSGO:
         self._stop_requested = asyncio.Event()
 
     def watch(self, odd_id: str, strike_line=None, invert: bool = False,
-              max_age_seconds: float = 45.0) -> WatcherSGO:
-        watcher = WatcherSGO(self.event_id, odd_id,
+              max_age_seconds: float = 45.0) -> SgoOddWatch:
+        watcher = SgoOddWatch(self.event_id, odd_id,
                               max_age_seconds=max_age_seconds, invert=invert,
                               strike_line=strike_line)
         self.watchers.append(watcher)
         return watcher
 
     def refresh(self):
+        if not self.watchers:
+            return
+        params = {"eventID": self.event_id, "includeOpposingOdds": "true",
+                  "oddID": ",".join(watcher.odd_id
+                                    for watcher in self.watchers)}
+        if any(watcher.strike_line is not None for watcher in self.watchers):
+            params["includeAltLines"] = "true"
+        events = events_in(sgo_get("/events", params))
+        if not events:
+            raise RuntimeError(f"event {self.event_id} not found")
+        event_odds = events[0].get("odds", {})
         for watcher in self.watchers:
-            watcher.refresh()
+            try:
+                watcher.apply(event_odds)
+            except Exception as error:
+                log.warning("SGO apply failed for %s: %s",
+                            watcher.odd_id, error)
 
     def stop(self):
         self._stop_requested.set()
@@ -213,9 +240,7 @@ def list_events(args):
         matchup = " vs ".join(
             str(teams.get(side, {}).get("names", {}).get("long")
                 or teams.get(side, {}).get("teamID", side))
-            for side in ("away", "home")
-        ) if teams \
-            else ""
+            for side in ("away", "home")) if teams else ""
         row = (f"{event.get('eventID', ''):42s} {matchup}  "
                f"{event.get('status', {}).get('startsAt', '')}")
         if not args.search or args.search.lower() in row.lower():
@@ -231,15 +256,14 @@ def list_odds(args):
                       or odd.get("bookOddsAvailable", True))
         row = (f"{odd_id:60s} fair={odd.get('fairOdds', '?'):>6} "
                f"book={odd.get('bookOdds', '?'):>6} "
-               f"line={odd.get('fairOverUnder') or odd.get('bookOverUnder') or '-'}")
-        if closed:
-            row += "  [stale/closed]"
+               f"line={odd.get('fairOverUnder') or odd.get('bookOverUnder') or '-'}"
+               + ("  [stale/closed]" if closed else ""))
         if not args.grep or args.grep.lower() in odd_id.lower():
             print(row)
 
 
 def watch_odd(args):
-    watcher = WatcherSGO(args.event_id, args.odd_id, invert=args.invert,
+    watcher = SgoOddWatch(args.event_id, args.odd_id, invert=args.invert,
                           strike_line=args.line)
     while True:
         watcher.refresh()
