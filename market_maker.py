@@ -57,7 +57,7 @@ async def run(args):
     fair_poller = None
     if args.sgo_odd:
         from sgo_fairvalue import EventPollerSGO
-        fair_poller = EventPollerSGO(args.sgo_event, poll_seconds=args.sgo_poll)
+        fair_poller = EventPollerSGO(args.sgo_event, poll_seconds=args.sgo_refresh_seconds)
         fair_watch = fair_poller.watch(args.sgo_odd, invert=args.sgo_invert,
                                        strike_line=args.sgo_line)
         fair_poller.refresh()
@@ -65,9 +65,9 @@ async def run(args):
                  fair_watch.fair_probability * 100, fair_watch.source,
                  fair_watch.consensus_line, fair_watch.market_name)
 
-    config = quoting.QuoteConfig(risk_aversion=args.gamma,
-                                 fill_intensity_decay=args.k,
-                                 quote_size=args.size,
+    config = quoting.QuoteConfig(risk_aversion=args.risk_aversion_gamma,
+                                 fill_intensity_decay=args.fill_intensity_decay_k,
+                                 quote_size=args.quote_size,
                                  max_inventory=args.max_inventory)
     volatility = quoting.VolatilityEWMA()
     feed = MarketDataFeed([args.ticker], include_fills=args.live)
@@ -82,13 +82,13 @@ async def run(args):
                    if fair_poller else None)
 
     started_at = time.time()
-    hard_stop = (started_at + args.minutes * 60
-                 if args.minutes else float("inf"))
+    hard_stop = (started_at + args.duration_minutes * 60
+                 if args.duration_minutes else float("inf"))
     fair_was_live = False
     last_gap_warning = 0.0
     try:
         while time.time() < hard_stop:
-            await asyncio.sleep(args.interval)
+            await asyncio.sleep(args.data_interval)
             now = time.time()
             if now > close_timestamp - CLOSE_BUFFER_SECONDS:
                 log.info("[%s] close buffer reached; pulling quotes", args.ticker)
@@ -177,12 +177,12 @@ def main():
                     "orders after a typed confirmation.")
     parser.add_argument("ticker")
     parser.add_argument("--live", action="store_true")
-    parser.add_argument("--minutes", type=float, default=None)
-    parser.add_argument("--interval", type=float, default=1.0)
-    parser.add_argument("--size", type=int, default=10)
+    parser.add_argument("--duration-minutes", type=float, default=None)
+    parser.add_argument("--data-interval-seconds", type=float, default=1.0)
+    parser.add_argument("--quote-size", type=int, default=10)
     parser.add_argument("--max-inventory", type=int, default=50)
-    parser.add_argument("--gamma", type=float, default=0.3)
-    parser.add_argument("--k", type=float, default=50.0)
+    parser.add_argument("--risk-aversion-gamma", type=float, default=0.3)
+    parser.add_argument("--fill-intensity-decay-k", type=float, default=50.0)
     parser.add_argument("--state-file", default=None, metavar="PATH",
                         help="write dashboard state here each tick "
                              "(then run dashboard.py against the same path)")
@@ -190,7 +190,7 @@ def main():
                         help="SportsGameOdds eventID (see sgo_fairvalue.py)")
     parser.add_argument("--sgo-odd", default=None, metavar="ODD_ID",
                         help="SGO oddID whose side settles Kalshi YES")
-    parser.add_argument("--sgo-poll", type=float, default=10.0)
+    parser.add_argument("--sgo-refresh-seconds", type=float, default=10.0)
     parser.add_argument("--sgo-line", default=None, metavar="STRIKE",
                         help="Kalshi strike; fair computed at this exact line "
                              "via bookmaker alternate lines")

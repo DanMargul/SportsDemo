@@ -18,7 +18,7 @@ The user must have a Kalshi account with an API key and a private key file. They
 
 As demonstrated in the screen recording above, a live market making session can be initiated with many more arguments:
 
-    python market_maker.py --live <KALSHI_TICKER> --sgo-event <EVENT_ID> --sgo-odd <ODD_ID> --sgo-line <LINE> --minutes <SESSION_LENGTH_MINUTES> --interval <MARKET_DATA_REFRESH_INTERVAL_SECONDS> --size <MAXIMUM_SIZE_ORDER>
+    python market_maker.py --live <KALSHI_TICKER> --sgo-event <EVENT_ID> --sgo-odd <ODD_ID> --sgo-line <LINE> --duration-minutes <SESSION_LENGTH_MINUTES> --data-interval-seconds <MARKET_DATA_REFRESH_INTERVAL_SECONDS> --quote-size <MAXIMUM_SIZE_ORDER>
 
 If any of {`--sgo-event`, `--sgo-odd`, `--sgo-line`} are used, a SportsGameOdds API key is required:
 
