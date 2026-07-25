@@ -19,13 +19,13 @@ dependencies = [
 dev = ["pyflakes>=3.0"]
 
 [project.scripts]
-sports-marketmaker = "sports_capital.market_maker:main"
-sports-discover = "sports_capital.discover:main"
-sports-report = "sports_capital.session_report:main"
-sports-dashboard = "sports_capital.dashboard:main"
-sports-analyze = "sports_capital.analyze:main"
-sports-devig = "sports_capital.devig:main"
-sports-sgo = "sports_capital.sgo_fairvalue:main"
+sports-marketmaker = "sports_markets.market_maker:main"
+sports-discover = "sports_markets.discover:main"
+sports-report = "sports_markets.session_report:main"
+sports-dashboard = "sports_markets.dashboard:main"
+sports-analyze = "sports_markets.analyze:main"
+sports-devig = "sports_markets.devig:main"
+sports-sgo = "sports_markets.sgo_fairvalue:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
