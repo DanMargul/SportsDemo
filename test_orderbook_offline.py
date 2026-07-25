@@ -460,6 +460,233 @@ def test_sgo_shared_poll():
           "opt-in)")
 
 
+def test_league_pace_profiles():
+    import game_clock
+    expected_hours = {"MLB": 2.7, "NFL": 3.2, "NBA": 2.25, "NHL": 2.5,
+                      "EPL": 1.9}
+    for league, hours in expected_hours.items():
+        profile = game_clock.profile_for(league)
+        actual = profile.nominal_real_seconds / 3600.0
+        assert abs(actual - hours) < 0.15, f"{league}: {actual:.2f}h"
+    assert game_clock.profile_for("soccer").league == "EPL"
+    assert game_clock.profile_for("mlb").league == "MLB"
+    assert game_clock.profile_for("WNBA").league == "NBA"
+    try:
+        game_clock.profile_for("kabaddi")
+        assert False, "unknown league should raise"
+    except KeyError:
+        pass
+    print("PASS league pace profiles (nominal durations, aliases, unknown)")
+
+
+def test_remaining_decreases_monotonically():
+    import game_clock
+    previous = float("inf")
+    for inning in range(1, 10):
+        estimate = game_clock.estimate_remaining(
+            "MLB", game_clock.innings_remaining(inning, True))
+        assert estimate.seconds < previous, f"inning {inning}"
+        previous = estimate.seconds
+
+    previous = float("inf")
+    for period, clock in [(1, 900), (2, 900), (3, 900), (4, 900), (4, 60)]:
+        units = game_clock.clock_units_remaining(period, clock, "NFL")
+        estimate = game_clock.estimate_remaining("NFL", units)
+        assert estimate.seconds < previous, f"NFL Q{period} {clock}s"
+        previous = estimate.seconds
+    print("PASS remaining time decreases monotonically through a game")
+
+
+def test_pace_calibration():
+    import game_clock
+    units = game_clock.innings_remaining(6, True)
+    prior = game_clock.estimate_remaining("MLB", units)
+
+    fast = game_clock.estimate_remaining("MLB", units,
+                                         elapsed_real_seconds=60 * 60)
+    slow = game_clock.estimate_remaining("MLB", units,
+                                         elapsed_real_seconds=130 * 60)
+    assert fast.seconds < prior.seconds < slow.seconds
+    assert fast.pace_factor < 1.0 < slow.pace_factor
+    assert "calibrated" in fast.pace_source
+
+    # a game running exactly on the prior pace must recover factor 1.0
+    profile = game_clock.profile_for("MLB")
+    split = game_clock.split_at_units_remaining(profile, units)
+    on_pace = split.played_weighted_units * profile.base_seconds_per_unit
+    exact = game_clock.estimate_remaining("MLB", units,
+                                          elapsed_real_seconds=on_pace)
+    assert abs(exact.pace_factor - 1.0) < 1e-9
+    assert abs(exact.seconds - prior.seconds) < 1e-6
+
+    # too little played to calibrate: falls back to the prior
+    early = game_clock.estimate_remaining(
+        "MLB", game_clock.innings_remaining(1, False),
+        elapsed_real_seconds=45 * 60)
+    assert early.pace_factor == 1.0 and early.pace_source == "league prior"
+
+    # absurd elapsed is clamped rather than propagated
+    absurd = game_clock.estimate_remaining("MLB", units,
+                                           elapsed_real_seconds=6 * 3600)
+    assert absurd.pace_factor <= game_clock.MAXIMUM_PACE_FACTOR
+    print("PASS pace calibration (fast/slow, exact recovery, early fallback, "
+          "clamping)")
+
+
+def test_calibration_weight_ramps():
+    import game_clock
+    weights = [game_clock.calibration_weight(f)
+               for f in (0.0, 0.05, 0.2, 0.4, 0.5, 0.9)]
+    assert weights[0] == 0.0 and weights[1] == 0.0
+    assert 0 < weights[2] < weights[3] < 1.0
+    assert weights[4] == 1.0 and weights[5] == 1.0
+    print("PASS calibration weight ramps from prior-only to fully observed")
+
+
+def test_breaks_and_overtime():
+    import game_clock
+    before_half = game_clock.estimate_remaining(
+        "NFL", game_clock.clock_units_remaining(2, 900, "NFL"))
+    after_half = game_clock.estimate_remaining(
+        "NFL", game_clock.clock_units_remaining(3, 900, "NFL"))
+    assert before_half.remaining_break_seconds == 780.0
+    assert after_half.remaining_break_seconds == 0.0
+
+    first = game_clock.estimate_remaining(
+        "NHL", game_clock.clock_units_remaining(1, 1200, "NHL"))
+    third = game_clock.estimate_remaining(
+        "NHL", game_clock.clock_units_remaining(3, 1200, "NHL"))
+    assert first.remaining_break_seconds == 2160.0
+    assert third.remaining_break_seconds == 0.0
+
+    over = game_clock.estimate_remaining("MLB", 0.0)
+    assert over.seconds == over.overtime_allowance_seconds > 0
+    assert game_clock.estimate_remaining(
+        "MLB", 0.0, include_overtime=False).seconds == 0.0
+    print("PASS scheduled breaks drop out once passed; overtime allowance")
+
+
+def test_break_seconds_do_not_scale_with_pace():
+    import game_clock
+    units = game_clock.clock_units_remaining(2, 900, "NFL")
+    profile = game_clock.profile_for("NFL")
+    split = game_clock.split_at_units_remaining(profile, units)
+    on_pace = split.played_weighted_units * profile.base_seconds_per_unit
+    slow = game_clock.estimate_remaining("NFL", units,
+                                         elapsed_real_seconds=on_pace * 1.5)
+    assert slow.pace_factor > 1.0
+    assert slow.remaining_break_seconds == 780.0
+    print("PASS halftime stays a fixed real duration under pace calibration")
+
+
+def test_elapsed_to_units_inversion():
+    import game_clock
+    profile = game_clock.profile_for("MLB")
+    assert game_clock.units_remaining_from_elapsed("MLB", 0) == 9.0
+    assert game_clock.units_remaining_from_elapsed("MLB", 10 * 3600) == 0.0
+    previous = 9.0
+    for minutes in (15, 45, 90, 130, 160):
+        units = game_clock.units_remaining_from_elapsed("MLB", minutes * 60)
+        assert units < previous
+        previous = units
+
+    # inverting the prior then re-estimating must reproduce the elapsed time
+    for minutes in (20, 60, 100):
+        units = game_clock.units_remaining_from_elapsed("MLB", minutes * 60)
+        split = game_clock.split_at_units_remaining(profile, units)
+        rebuilt = (split.played_weighted_units * profile.base_seconds_per_unit
+                   + split.played_break_seconds)
+        assert abs(rebuilt - minutes * 60) < 1.0, minutes
+
+    # a league with breaks must invert through them too
+    nfl = game_clock.profile_for("NFL")
+    for minutes in (30, 75, 110, 160):
+        units = game_clock.units_remaining_from_elapsed("NFL", minutes * 60)
+        assert 0.0 <= units <= nfl.regulation_units
+    print("PASS elapsed-to-units inversion (monotone, round-trips, breaks)")
+
+
+def test_game_clock_horizon():
+    import game_clock
+    start = 1_000_000.0
+    horizon = game_clock.GameClockHorizon("MLB", start)
+
+    assert horizon.seconds_remaining(start - 1800) > \
+        horizon.seconds_remaining(start)
+    previous = float("inf")
+    for minutes in (0, 30, 60, 90, 120, 150):
+        seconds = horizon.seconds_remaining(start + minutes * 60)
+        assert seconds < previous
+        previous = seconds
+    assert horizon.seconds_remaining(start + 10 * 3600) >= \
+        horizon.minimum_seconds
+
+    assert "inferred" in horizon.estimate(start + 3600).pace_source
+    horizon.set_game_state(game_clock.innings_remaining(8, False))
+    assert "calibrated" in horizon.estimate(start + 140 * 60).pace_source
+    horizon.set_game_state(None)
+    assert "inferred" in horizon.estimate(start + 140 * 60).pace_source
+    print("PASS game clock horizon (decays, floors, live state overrides)")
+
+
+def test_maker_horizon_wiring():
+    import argparse
+    import game_clock
+    import market_maker
+    close_timestamp = 4_000_000_000.0
+
+    def make_args(ticker, **overrides):
+        base = {"ticker": ticker, "game_start": None, "no_game_clock": False}
+        base.update(overrides)
+        return argparse.Namespace(**base)
+
+    # league and start time come from the ticker, no flags at all
+    horizon = market_maker.build_game_horizon(
+        make_args("KXMLBTOTAL-26JUL191920LADNYY-9"), close_timestamp)
+    assert horizon is not None and horizon.league == "MLB"
+    from datetime import datetime, timezone
+    started = datetime.fromtimestamp(horizon.game_start_timestamp,
+                                     timezone.utc)
+    assert (started.year, started.month, started.day) == (2026, 7, 19)
+    assert started.hour == 23 and started.minute == 20      # 19:20 ET
+
+    # explicit opt-out
+    assert market_maker.build_game_horizon(
+        make_args("KXMLBTOTAL-26JUL191920LADNYY-9", no_game_clock=True),
+        close_timestamp) is None
+
+    # unknown family falls back rather than guessing
+    assert market_maker.build_game_horizon(
+        make_args("KXWEIRDTHING-whatever"), close_timestamp) is None
+
+    # override wins over the ticker, and a bad override is fatal
+    overridden = market_maker.build_game_horizon(
+        make_args("KXMLBTOTAL-26JUL191920LADNYY-9",
+                  game_start="2026-07-20T01:00:00Z"), close_timestamp)
+    assert overridden.game_start_timestamp == \
+        kalshi.parse_iso_timestamp("2026-07-20T01:00:00Z")
+    try:
+        market_maker.build_game_horizon(
+            make_args("KXMLBTOTAL-26JUL191920LADNYY-9",
+                      game_start="not-a-timestamp"), close_timestamp)
+        assert False, "unparseable --game-start should exit"
+    except SystemExit:
+        pass
+
+    # no horizon means the old close_time behaviour, unchanged
+    assert market_maker.horizon_seconds(None, close_timestamp, 1000.0) == \
+        close_timestamp - 1000.0
+
+    # with a horizon: cap regime early, game clock regime late
+    start = horizon.game_start_timestamp
+    early = market_maker.horizon_seconds(horizon, close_timestamp, start + 600)
+    late = market_maker.horizon_seconds(horizon, close_timestamp,
+                                        start + 150 * 60)
+    assert late < 1800.0 < early < close_timestamp - start
+    print("PASS maker horizon wiring (derived from ticker, opt-out, override, "
+          "fallbacks, two regimes)")
+
+
 def test_ticker_parsing():
     from market_catalog import parse_ticker
     total = parse_ticker("KXMLBTOTAL-26JUL191920LADNYY-9")
@@ -493,7 +720,6 @@ def test_ticker_parsing():
     print("PASS ticker parsing (total, player prop, moneyline, doubleheader, "
           "unknown family, all-30-teams, AZ/ATH/SEA)")
 
-
 def test_event_ranking():
     from market_catalog import parse_ticker
     from event_matcher import rank_events
@@ -517,7 +743,6 @@ def test_event_ranking():
     assert ranked[0].confidence >= 0.85
     print("PASS event ranking (correct match ranks first, distractors below)")
 
-
 def test_odd_side_inference():
     from market_catalog import parse_ticker
     from odd_matcher import match_odd
@@ -538,6 +763,13 @@ def test_odd_side_inference():
     print("PASS odd side inference (over no-invert, home no-invert, away "
           "invert+verify, settlement always flagged)")
 
+def test_propose_rejects_bare_prefix():
+    import argparse
+    import discover
+    result = discover.propose(argparse.Namespace(ticker="KXMLBHRR",
+                                                 search=None))
+    assert result is None
+    print("PASS propose rejects bare series prefix (redirects to scan)")
 
 def test_scan_fetches_sgo_once():
     import argparse, io, contextlib
@@ -569,16 +801,6 @@ def test_scan_fetches_sgo_once():
         kalshi.KalshiClient.get_markets = original_get_markets
     print("PASS scan fetches SGO once for many markets (batched)")
 
-
-def test_propose_rejects_bare_prefix():
-    import argparse
-    import discover
-    result = discover.propose(argparse.Namespace(ticker="KXMLBHRR",
-                                                 search=None))
-    assert result is None
-    print("PASS propose rejects bare series prefix (redirects to scan)")
-
-
 def test_market_enumeration_pagination():
     import kalshi
     pages = [
@@ -603,7 +825,6 @@ def test_market_enumeration_pagination():
     assert len(client2.get_markets(series_ticker="X", max_markets=100)) == 100
     print("PASS market enumeration (cursor pagination, max cap)")
 
-
 def test_enumerate_filters_families():
     import discover
     import kalshi
@@ -619,7 +840,6 @@ def test_enumerate_filters_families():
     assert known[0][1].strike == 8.5
     print("PASS enumerate filters (known families kept, unknown skipped)")
 
-
 def test_player_prop_flagged():
     from market_catalog import parse_ticker
     from odd_matcher import match_odd
@@ -628,7 +848,6 @@ def test_player_prop_flagged():
     assert prop.confidence <= 0.3
     assert any("hand" in c.lower() for c in prop.concerns)
     print("PASS player prop flagged (low confidence when unresolved)")
-
 
 def test_player_code_decoding():
     from player_codes import decode_player_code, name_similarity
@@ -644,6 +863,33 @@ def test_player_code_decoding():
     assert name_similarity(d3, "Mookie Betts") == 0.0
     print("PASS player code decoding (team/initial/name/number, hyphen names)")
 
+def test_player_resolution_in_event():
+    from player_id_map import resolve_player, entity_ids_in_event
+    event_odds = {
+        "batting_hits+runs+rbi-SHOHEI_OHTANI_1_MLB-game-ou-over": {
+            "statEntityName": "Shohei Ohtani"},
+        "batting_hits+runs+rbi-KYLE_SCHWARBER_1_MLB-game-ou-over": {
+            "statEntityName": "Kyle Schwarber"},
+        "points-all-game-ou-over": {}}
+    stat = "batting_hits+runs+rbi"
+    harvested = entity_ids_in_event(event_odds, stat)
+    assert set(harvested) == {"SHOHEI_OHTANI_1_MLB", "KYLE_SCHWARBER_1_MLB"}
+
+    entity, score, source, _ = resolve_player(
+        "LADSOHTANI17", {"LAD", "PHI"}, stat, event_odds)
+    assert entity == "SHOHEI_OHTANI_1_MLB" and score == 1.0
+    assert source == "matched-in-event"
+
+    cached, cscore, csource, _ = resolve_player(
+        "LADSOHTANI17", {"LAD"}, stat, {},
+        id_map={"LADSOHTANI17": "SHOHEI_OHTANI_1_MLB"})
+    assert cached == "SHOHEI_OHTANI_1_MLB" and csource == "id-map"
+
+    missing, mscore, msource, mconcerns = resolve_player(
+        "MINBBUXTON25", {"MIN"}, stat, event_odds)
+    assert missing is None and mconcerns
+    print("PASS player resolution (event harvest, ID map cache, "
+          "no-fabrication when absent)")
 
 def test_name_scoring_against_market_names():
     from player_codes import decode_player_code, name_similarity
@@ -665,6 +911,26 @@ def test_name_scoring_against_market_names():
     print("PASS name scoring (market names, entity IDs, wrong-initial "
           "refused)")
 
+def test_event_local_time_and_tiebreak():
+    from market_catalog import parse_ticker
+    from event_matcher import rank_events
+    parsed = parse_ticker("KXMLBHRR-26JUL212140ATHAZ-ATHTSODERSTROM21-2")
+    assert parsed.time_hhmm == "2140"
+    events = [
+        {"eventID": "RIGHT",
+         "teams": {"away": {"names": {"long": "Athletics"}},
+                   "home": {"names": {"long": "Arizona Diamondbacks"}}},
+         "status": {"startsAt": "2026-07-22T01:40:00Z"}},
+        {"eventID": "NEXTDAY",
+         "teams": {"away": {"names": {"long": "Athletics"}},
+                   "home": {"names": {"long": "Arizona Diamondbacks"}}},
+         "status": {"startsAt": "2026-07-22T22:10:00Z"}}]
+    ranked = rank_events(parsed, events)
+    assert ranked[0].sgo_event_id == "RIGHT"
+    # a 21:40 ET game stored as next-day UTC must still be a full date match
+    assert ranked[0].confidence >= 0.9, ranked[0].confidence
+    assert ranked[0].confidence > ranked[1].confidence
+    print("PASS event local-time date match and start-time tiebreak")
 
 def test_hard_player_name_shapes():
     from player_codes import decode_player_code, name_similarity
@@ -693,6 +959,30 @@ def test_hard_player_name_shapes():
     print("PASS hard player names (multi-word surname, dropped accent, "
           "ticker alias, no false conflation)")
 
+def test_ambiguous_player_forces_review():
+    import argparse, io, contextlib
+    import discover
+    def fake_sgo(path, params):
+        return {"data": [{"eventID": "EV",
+            "teams": {"away": {"names": {"long": "Athletics"}},
+                      "home": {"names": {"long": "Arizona Diamondbacks"}}},
+            "status": {"startsAt": "2026-07-22T01:40:00Z"},
+            "odds": {
+                "batting_hits+runs+rbi-JACOB_WILSON_1_MLB-game-ou-over":
+                    {"marketName": "Jacob Wilson Hits + Runs + RBIs"},
+                "batting_hits+runs+rbi-JOSH_WILSON_1_MLB-game-ou-over":
+                    {"marketName": "Josh Wilson Hits + Runs + RBIs"}}}]}
+    original = discover.sgo_get
+    discover.sgo_get = fake_sgo
+    discover._id_map._cache = {}
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            entry = discover.propose(argparse.Namespace(
+                ticker="KXMLBHRR-26JUL212140ATHAZ-ATHJWILSON5-2", search=None))
+    finally:
+        discover.sgo_get = original
+    assert "_REVIEW" in entry and "ambiguous" in entry["_REVIEW"]
+    print("PASS ambiguous player match is flagged in the draft config")
 
 def test_csv_review_roundtrip():
     import csv, io, json, os, tempfile, contextlib, argparse
@@ -750,119 +1040,141 @@ def test_csv_review_roundtrip():
           "PLAYER_UNKNOWN refused, invert preserved)")
 
 
-def test_ambiguous_player_forces_review():
-    import argparse, io, contextlib
-    import discover
-    def fake_sgo(path, params):
-        return {"data": [{"eventID": "EV",
-            "teams": {"away": {"names": {"long": "Athletics"}},
-                      "home": {"names": {"long": "Arizona Diamondbacks"}}},
-            "status": {"startsAt": "2026-07-22T01:40:00Z"},
-            "odds": {
-                "batting_hits+runs+rbi-JACOB_WILSON_1_MLB-game-ou-over":
-                    {"marketName": "Jacob Wilson Hits + Runs + RBIs"},
-                "batting_hits+runs+rbi-JOSH_WILSON_1_MLB-game-ou-over":
-                    {"marketName": "Josh Wilson Hits + Runs + RBIs"}}}]}
-    original = discover.sgo_get
-    discover.sgo_get = fake_sgo
-    discover._id_map._cache = {}
+class RecordingCursor:
+    def __init__(self, connection):
+        self.connection = connection
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exception):
+        return False
+
+    def execute(self, statement, parameters=None):
+        self.connection.statements.append((statement, parameters))
+        if "INSERT INTO schema_migrations" in statement:
+            self.connection.versions.add(parameters[0])
+
+    def fetchall(self):
+        return [(version,) for version in sorted(self.connection.versions)]
+
+
+class RecordingConnection:
+    def __init__(self):
+        self.statements = []
+        self.versions = set()
+        self.commits = 0
+
+    def cursor(self):
+        return RecordingCursor(self)
+
+    def commit(self):
+        self.commits += 1
+
+
+def test_migration_discovery():
+    import db
+    migrations = db.discover_migrations()
+    assert migrations, "no migrations found"
+    versions = [migration.version for migration in migrations]
+    assert versions == sorted(versions), "migrations not ordered by version"
+    assert len(set(versions)) == len(versions), "duplicate versions"
+    assert versions[0] == 1
+    for migration in migrations:
+        assert migration.name and migration.name.islower()
+        assert migration.sql().strip(), f"{migration.filename} is empty"
+    print(f"PASS migration discovery ({len(migrations)} migrations, ordered, "
+          f"uniquely versioned)")
+
+
+def test_migration_filename_validation():
+    import db
+    import tempfile, pathlib
+    directory = pathlib.Path(tempfile.mkdtemp())
+    (directory / "0001_first.sql").write_text("SELECT 1;")
+    (directory / "not_a_migration.sql").write_text("SELECT 1;")
     try:
-        with contextlib.redirect_stdout(io.StringIO()):
-            entry = discover.propose(argparse.Namespace(
-                ticker="KXMLBHRR-26JUL212140ATHAZ-ATHJWILSON5-2", search=None))
+        db.discover_migrations(directory)
+        assert False, "badly named migration should raise"
+    except ValueError:
+        pass
+
+    duplicate = pathlib.Path(tempfile.mkdtemp())
+    (duplicate / "0001_first.sql").write_text("SELECT 1;")
+    (duplicate / "0001_also_first.sql").write_text("SELECT 1;")
+    try:
+        db.discover_migrations(duplicate)
+        assert False, "duplicate version should raise"
+    except ValueError:
+        pass
+
+    try:
+        db.discover_migrations(directory / "nonexistent")
+        assert False, "missing directory should raise"
+    except FileNotFoundError:
+        pass
+    print("PASS migration filename validation (naming, duplicates, missing)")
+
+
+def test_migration_runner_applies_each_once():
+    import db
+    connection = RecordingConnection()
+    applied = db.migrate(connection)
+    assert [migration.version for migration in applied] == \
+        [migration.version for migration in db.discover_migrations()]
+    assert connection.commits >= len(applied)
+    executed = " ".join(statement for statement, _p in connection.statements)
+    assert "CREATE TABLE IF NOT EXISTS schema_migrations" in executed
+    assert "CREATE TABLE markets" in executed
+
+    again = db.migrate(connection)
+    assert again == [], "second migrate should be a no-op"
+
+    status = db.migration_status(connection)
+    assert status and all(is_applied for _migration, is_applied in status)
+    print("PASS migration runner (applies once, idempotent, records versions)")
+
+
+def test_migration_runner_resumes_midway():
+    import db
+    connection = RecordingConnection()
+    connection.versions.add(1)
+    pending = db.pending_migrations(connection)
+    assert 1 not in [migration.version for migration in pending]
+    applied = db.migrate(connection)
+    assert [migration.version for migration in applied] == \
+        [migration.version for migration in pending]
+    print("PASS migration runner resumes from a partial schema")
+
+
+def test_database_url_required():
+    import db
+    import os
+    saved = os.environ.pop("DATABASE_URL", None)
+    try:
+        db.database_url()
+        assert False, "missing DATABASE_URL should raise"
+    except RuntimeError:
+        pass
     finally:
-        discover.sgo_get = original
-    assert "_REVIEW" in entry and "ambiguous" in entry["_REVIEW"]
-    print("PASS ambiguous player match is flagged in the draft config")
-
-
-def test_event_local_time_and_tiebreak():
-    from market_catalog import parse_ticker
-    from event_matcher import rank_events
-    parsed = parse_ticker("KXMLBHRR-26JUL212140ATHAZ-ATHTSODERSTROM21-2")
-    assert parsed.time_hhmm == "2140"
-    events = [
-        {"eventID": "RIGHT",
-         "teams": {"away": {"names": {"long": "Athletics"}},
-                   "home": {"names": {"long": "Arizona Diamondbacks"}}},
-         "status": {"startsAt": "2026-07-22T01:40:00Z"}},
-        {"eventID": "NEXTDAY",
-         "teams": {"away": {"names": {"long": "Athletics"}},
-                   "home": {"names": {"long": "Arizona Diamondbacks"}}},
-         "status": {"startsAt": "2026-07-22T22:10:00Z"}}]
-    ranked = rank_events(parsed, events)
-    assert ranked[0].sgo_event_id == "RIGHT"
-    # a 21:40 ET game stored as next-day UTC must still be a full date match
-    assert ranked[0].confidence >= 0.9, ranked[0].confidence
-    assert ranked[0].confidence > ranked[1].confidence
-    print("PASS event local-time date match and start-time tiebreak")
-
-
-def test_player_resolution_in_event():
-    from player_id_map import resolve_player, entity_ids_in_event
-    event_odds = {
-        "batting_hits+runs+rbi-SHOHEI_OHTANI_1_MLB-game-ou-over": {
-            "statEntityName": "Shohei Ohtani"},
-        "batting_hits+runs+rbi-KYLE_SCHWARBER_1_MLB-game-ou-over": {
-            "statEntityName": "Kyle Schwarber"},
-        "points-all-game-ou-over": {}}
-    stat = "batting_hits+runs+rbi"
-    harvested = entity_ids_in_event(event_odds, stat)
-    assert set(harvested) == {"SHOHEI_OHTANI_1_MLB", "KYLE_SCHWARBER_1_MLB"}
-
-    entity, score, source, _ = resolve_player(
-        "LADSOHTANI17", {"LAD", "PHI"}, stat, event_odds)
-    assert entity == "SHOHEI_OHTANI_1_MLB" and score == 1.0
-    assert source == "matched-in-event"
-
-    cached, cscore, csource, _ = resolve_player(
-        "LADSOHTANI17", {"LAD"}, stat, {},
-        id_map={"LADSOHTANI17": "SHOHEI_OHTANI_1_MLB"})
-    assert cached == "SHOHEI_OHTANI_1_MLB" and csource == "id-map"
-
-    missing, mscore, msource, mconcerns = resolve_player(
-        "MINBBUXTON25", {"MIN"}, stat, event_odds)
-    assert missing is None and mconcerns
-    print("PASS player resolution (event harvest, ID map cache, "
-          "no-fabrication when absent)")
+        if saved is not None:
+            os.environ["DATABASE_URL"] = saved
+    os.environ["DATABASE_URL"] = "postgresql:///example"
+    try:
+        assert db.database_url() == "postgresql:///example"
+    finally:
+        os.environ.pop("DATABASE_URL", None)
+        if saved is not None:
+            os.environ["DATABASE_URL"] = saved
+    print("PASS database url comes from the environment")
 
 
 def main():
-    test_order_book()
-    test_apply_delta()
-    test_feed_dispatch()
-    test_ewma_volatility()
-    test_parse_iso_timestamp()
-    test_devig()
-    test_taking_edge()
-    test_quoting()
-    test_dry_run_loop_step()
-    test_order_request_body()
-    test_order_manager()
-    test_dry_run_places_nothing()
-    test_fill_accounting()
-    test_fill_helpers()
-    test_fill_updates_position_from_resting()
-    test_dashboard_state_roundtrip()
-    test_ticker_parsing()
-    test_event_ranking()
-    test_odd_side_inference()
-    test_propose_rejects_bare_prefix()
-    test_scan_fetches_sgo_once()
-    test_market_enumeration_pagination()
-    test_enumerate_filters_families()
-    test_player_prop_flagged()
-    test_player_code_decoding()
-    test_player_resolution_in_event()
-    test_name_scoring_against_market_names()
-    test_event_local_time_and_tiebreak()
-    test_hard_player_name_shapes()
-    test_ambiguous_player_forces_review()
-    test_csv_review_roundtrip()
-    test_sgo_fair_value()
-    test_sgo_strike_matching()
-    test_sgo_shared_poll()
-    print("\nall offline tests passed")
+    tests = [function for name, function in sorted(globals().items())
+             if name.startswith("test_") and callable(function)]
+    for test in tests:
+        test()
+    print(f"\nall offline tests passed ({len(tests)} tests)")
 
 
 if __name__ == "__main__":
