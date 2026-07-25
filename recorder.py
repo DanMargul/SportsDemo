@@ -86,24 +86,25 @@ class Recorder:
         self.is_live = is_live
         self.config = config or {}
         self.url = url or os.environ.get("DATABASE_URL")
+        if not self.url:
+            raise RuntimeError(
+                "DATABASE_URL is required: the recorder no longer runs "
+                "without a database")
         self.pending = collections.deque(maxlen=queue_limit)
         self.connection = None
         self.session_id = None
         self.market_ids = {}
         self.market_details = {}
         self.dropped = 0
+        self.session_closed = False
         self.written = 0
         self.failures = 0
         self.last_error = None
         self._stop_requested = asyncio.Event()
 
     @property
-    def enabled(self):
-        return bool(self.url)
-
-    @property
     def connected(self):
-        return self.connection is not None and self.session_id is not None
+        return self.connection is not None
 
     def track_market(self, ticker, parsed=None, close_timestamp=None):
         self.market_details[ticker] = {
@@ -116,8 +117,6 @@ class Recorder:
                            if close_timestamp else None)}
 
     def submit(self, table, ticker, values):
-        if not self.enabled:
-            return
         try:
             if len(self.pending) == self.pending.maxlen:
                 self.dropped += 1
@@ -136,7 +135,7 @@ class Recorder:
             log.debug("recorder record_book failed: %s", error)
 
     def record_quote(self, ticker, moment, quotes, inventory, sigma,
-                     tau_seconds, external_fair, blended_fair=None):
+                     tau_seconds, external_fair):
         try:
             self.submit("quotes", ticker, (
                 as_timestamp(moment),
@@ -144,7 +143,9 @@ class Recorder:
                 getattr(quotes, "ask_cents", None),
                 getattr(quotes, "bid_size", None),
                 inventory, sigma, tau_seconds, external_fair,
-                blended_fair, None, None))
+                getattr(quotes, "blended_fair_cents", None),
+                getattr(quotes, "reservation_cents", None),
+                getattr(quotes, "half_spread_cents", None)))
         except Exception as error:
             log.debug("recorder record_quote failed: %s", error)
 
@@ -194,12 +195,18 @@ class Recorder:
         import db
         self.connection = db.connect(self.url)
         with self.connection.cursor() as cursor:
-            cursor.execute(
-                "INSERT INTO sessions (environment, is_live, git_commit, "
-                "config) VALUES (%s, %s, %s, %s) RETURNING id",
-                (self.environment, self.is_live, current_git_commit(),
-                 json.dumps(self.config)))
-            self.session_id = cursor.fetchone()[0]
+            if self.session_id is not None:
+                cursor.execute("SELECT 1 FROM sessions WHERE id = %s",
+                               (self.session_id,))
+                if cursor.fetchone() is None:
+                    self.session_id = None
+            if self.session_id is None:
+                cursor.execute(
+                    "INSERT INTO sessions (environment, is_live, git_commit, "
+                    "config) VALUES (%s, %s, %s, %s) RETURNING id",
+                    (self.environment, self.is_live, current_git_commit(),
+                     json.dumps(self.config)))
+                self.session_id = cursor.fetchone()[0]
         self.connection.commit()
         self.market_ids = {}
 
@@ -271,7 +278,17 @@ class Recorder:
             log.info("recorder connected (session %s)", self.session_id)
         batch = self.drain()
         if batch:
-            self.write_batch(batch)
+            try:
+                self.write_batch(batch)
+            except Exception:
+                self.requeue(batch)
+                raise
+
+    def requeue(self, batch):
+        space = self.pending.maxlen - len(self.pending)
+        kept = batch[-space:] if space else []
+        self.dropped += len(batch) - len(kept)
+        self.pending.extendleft(reversed(kept))
 
     def disconnect(self):
         if self.connection is not None:
@@ -280,12 +297,12 @@ class Recorder:
             except Exception:
                 pass
         self.connection = None
-        self.session_id = None
 
     def close_session(self):
-        if not self.connected:
+        if not self.connected or self.session_id is None:
             return
         try:
+            self.session_closed = True
             with self.connection.cursor() as cursor:
                 cursor.execute(
                     "UPDATE sessions SET ended_at = now() WHERE id = %s",
@@ -298,9 +315,6 @@ class Recorder:
         self._stop_requested.set()
 
     async def run(self):
-        if not self.enabled:
-            log.info("recorder disabled (no DATABASE_URL)")
-            return
         retry_seconds = 1.0
         while not self._stop_requested.is_set():
             try:
@@ -329,3 +343,14 @@ class Recorder:
         self.disconnect()
         log.info("recorder stopped: %d rows written, %d dropped, %d failures",
                  self.written, self.dropped, self.failures)
+
+    def final_flush(self):
+        if self.session_closed:
+            return
+        try:
+            self.flush_once()
+            self.close_session()
+        except Exception as error:
+            log.debug("recorder final flush failed: %s", error)
+        finally:
+            self.disconnect()

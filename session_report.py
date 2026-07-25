@@ -56,11 +56,27 @@ SELECT count(*) AS observations,
 FROM paired WHERE mid_now IS NOT NULL AND mid_later IS NOT NULL
 """
 
+SESSION_ACTIVITY = """
+SELECT s.id,
+       min(q.ts)::timestamp(0) AS first_quote,
+       max(q.ts)::timestamp(0) AS last_quote,
+       round(EXTRACT(epoch FROM max(q.ts) - min(q.ts))/60.0, 1) AS minutes,
+       (s.ended_at IS NOT NULL) AS closed_cleanly
+FROM sessions s JOIN quotes q ON q.session_id = s.id
+GROUP BY s.id, s.ended_at ORDER BY s.id DESC LIMIT %s
+"""
+
 FILL_QUALITY_BY_SPREAD = """
 SELECT b.spread_cents,
        count(*) AS fills,
-       round(avg(f.price_cents), 1) AS avg_fill_price,
-       round(avg(b.mid_cents), 1) AS avg_mid_at_fill
+       count(*) FILTER (WHERE f.book_side = 'bid') AS buys,
+       count(*) FILTER (WHERE f.book_side = 'ask') AS sells,
+       round(avg(CASE WHEN f.book_side = 'bid' THEN b.mid_cents - f.price_cents
+                      ELSE f.price_cents - b.mid_cents END), 2)
+           AS avg_edge_at_fill,
+       round(sum(CASE WHEN f.book_side = 'bid' THEN b.mid_cents - f.price_cents
+                      ELSE f.price_cents - b.mid_cents END
+                 * f.contracts) / 100.0, 2) AS captured_dollars
 FROM fills f
 JOIN LATERAL (
     SELECT * FROM book_snapshots b
@@ -113,7 +129,13 @@ def run_report(args):
                    f"(positive correlation means yes)", columns, rows)
 
         columns, rows = query(connection, FILL_QUALITY_BY_SPREAD)
-        print_rows("Fill quality by book spread", columns, rows)
+        print_rows("Spread captured at fill, by book spread "
+                   "(positive means inside the mid)", columns, rows)
+
+        columns, rows = query(connection, SESSION_ACTIVITY, (args.sessions,))
+        print_rows("Session activity by recorded data "
+                   "(ended_at stays NULL only after an unclean kill)",
+                   columns, rows)
 
 
 def main():

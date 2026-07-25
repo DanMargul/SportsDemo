@@ -58,15 +58,8 @@ ORDER BY m.ticker
 
 
 def open_store(url=None):
-    if not (url or os.environ.get("DATABASE_URL")):
-        return None
-    try:
-        import db
-        return DiscoveryStore(db.connect(url))
-    except Exception as error:
-        log.warning("could not open the discovery tables (%s); "
-                    "writing files only", error)
-        return None
+    import db
+    return DiscoveryStore(db.connect(url))
 
 
 def teams_from_evidence(evidence):

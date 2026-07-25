@@ -1,5 +1,3 @@
-import asyncio
-import json
 import os
 import tempfile
 import time
@@ -454,7 +452,7 @@ def test_sgo_shared_poll():
     assert abs(under_watch.fair_probability
                - (1 - devig.implied_probability("+120"))) < 1e-9
 
-    strike_watch = poller.watch(OVER, strike_line="249.5")
+    poller.watch(OVER, strike_line="249.5")
     poller.refresh()
     assert call_log[-1]["includeAltLines"] == "true"
     print("PASS SGO shared poll (one HTTP call for many watchers, alt-line "
@@ -631,61 +629,55 @@ def test_game_clock_horizon():
 
 
 def test_maker_horizon_wiring():
-    import argparse
-    import game_clock
     import market_maker
     close_timestamp = 4_000_000_000.0
 
-    def make_args(ticker, **overrides):
-        base = {"ticker": ticker, "game_start": None, "no_game_clock": False}
-        base.update(overrides)
-        return argparse.Namespace(**base)
+    def make_market(ticker):
+        market = market_maker.ManagedMarket(
+            {"ticker": ticker}, {}, None, dry_run=True)
+        market.close_timestamp = close_timestamp
+        return market
 
-    # league and start time come from the ticker, no flags at all
-    horizon = market_maker.build_game_horizon(
-        make_args("KXMLBTOTAL-26JUL191920LADNYY-9"), close_timestamp)
-    assert horizon is not None and horizon.league == "MLB"
+    market = make_market("KXMLBTOTAL-26JUL191920LADNYY-9")
+    market.build_horizon(use_game_clock=True)
+    assert market.horizon is not None and market.horizon.league == "MLB"
     from datetime import datetime, timezone
-    started = datetime.fromtimestamp(horizon.game_start_timestamp,
+    started = datetime.fromtimestamp(market.horizon.game_start_timestamp,
                                      timezone.utc)
     assert (started.year, started.month, started.day) == (2026, 7, 19)
-    assert started.hour == 23 and started.minute == 20      # 19:20 ET
+    assert started.hour == 23 and started.minute == 20
 
-    # explicit opt-out
-    assert market_maker.build_game_horizon(
-        make_args("KXMLBTOTAL-26JUL191920LADNYY-9", no_game_clock=True),
-        close_timestamp) is None
+    opted_out = make_market("KXMLBTOTAL-26JUL191920LADNYY-9")
+    opted_out.build_horizon(use_game_clock=False)
+    assert opted_out.horizon is None
 
-    # unknown family falls back rather than guessing
-    assert market_maker.build_game_horizon(
-        make_args("KXWEIRDTHING-whatever"), close_timestamp) is None
+    unknown = make_market("KXWEIRDTHING-whatever")
+    unknown.build_horizon(use_game_clock=True)
+    assert unknown.horizon is None
 
-    # override wins over the ticker, and a bad override is fatal
-    overridden = market_maker.build_game_horizon(
-        make_args("KXMLBTOTAL-26JUL191920LADNYY-9",
-                  game_start="2026-07-20T01:00:00Z"), close_timestamp)
-    assert overridden.game_start_timestamp == \
+    overridden = make_market("KXMLBTOTAL-26JUL191920LADNYY-9")
+    overridden.build_horizon(use_game_clock=True,
+                             game_start_override="2026-07-20T01:00:00Z")
+    assert overridden.horizon.game_start_timestamp == \
         kalshi.parse_iso_timestamp("2026-07-20T01:00:00Z")
+    broken = make_market("KXMLBTOTAL-26JUL191920LADNYY-9")
     try:
-        market_maker.build_game_horizon(
-            make_args("KXMLBTOTAL-26JUL191920LADNYY-9",
-                      game_start="not-a-timestamp"), close_timestamp)
+        broken.build_horizon(use_game_clock=True,
+                             game_start_override="not-a-timestamp")
         assert False, "unparseable --game-start should exit"
     except SystemExit:
         pass
 
-    # no horizon means the old close_time behaviour, unchanged
-    assert market_maker.horizon_seconds(None, close_timestamp, 1000.0) == \
-        close_timestamp - 1000.0
+    plain = make_market("KXMLBTOTAL-26JUL191920LADNYY-9")
+    plain.horizon = None
+    assert plain.seconds_to_close(1000.0) == close_timestamp - 1000.0
 
-    # with a horizon: cap regime early, game clock regime late
-    start = horizon.game_start_timestamp
-    early = market_maker.horizon_seconds(horizon, close_timestamp, start + 600)
-    late = market_maker.horizon_seconds(horizon, close_timestamp,
-                                        start + 150 * 60)
+    start = market.horizon.game_start_timestamp
+    early = market.seconds_to_close(start + 600)
+    late = market.seconds_to_close(start + 150 * 60)
     assert late < 1800.0 < early < close_timestamp - start
-    print("PASS maker horizon wiring (derived from ticker, opt-out, override, "
-          "fallbacks, two regimes)")
+    print("PASS maker horizon wiring (derived from ticker, opt-out, "
+          "override, fallbacks, two regimes)")
 
 
 def test_ticker_parsing():
@@ -793,13 +785,21 @@ def test_scan_fetches_sgo_once():
                      "points-home-game-ml-home": {}}}]}
     discover.sgo_get = counting_sgo
     discover._id_map._cache = {}
+    import discovery_store
+    original_open_store = discovery_store.open_store
+    fake_connection = FakeDiscoveryConnection(player_exists=False)
+    discovery_store.open_store = (
+        lambda url=None: discovery_store.DiscoveryStore(fake_connection))
     try:
         with contextlib.redirect_stdout(io.StringIO()):
             discover.scan(argparse.Namespace(series="KXMLBTOTAL", event=None,
                 status="open", max=100, search=None, out=None, env=None))
         assert calls["n"] == 1, f"expected 1 SGO fetch for 3 markets, got {calls['n']}"
+        assert fake_connection.commits >= 3, (
+            "scan must record every market to the database")
     finally:
         kalshi.KalshiClient.get_markets = original_get_markets
+        discovery_store.open_store = original_open_store
     print("PASS scan fetches SGO once for many markets (batched)")
 
 def test_market_enumeration_pagination():
@@ -1012,16 +1012,23 @@ def test_csv_review_roundtrip():
     written = list(csv.DictReader(open(csv_path)))
     assert set(discover.CSV_COLUMNS) == set(written[0].keys())
 
-    # build skips flagged rows
+    # build reads approved mappings from the database only
+    import discovery_store
     out_path = os.path.join(directory, "markets.json")
-    with contextlib.redirect_stdout(io.StringIO()):
-        discover.build_config(argparse.Namespace(
-            csv=csv_path, out=out_path, include_flagged=False))
+    original_open_store = discovery_store.open_store
+    discovery_store.open_store = lambda url=None: discovery_store.DiscoveryStore(
+        FakeDiscoveryConnection(approved_rows=[
+            ("AAA", "EV", "points-all-game-ou-over", 8.5, False)]))
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            discover.build_config(argparse.Namespace(out=out_path))
+    finally:
+        discovery_store.open_store = original_open_store
     config = json.load(open(out_path))
     assert [m["ticker"] for m in config["markets"]] == ["AAA"]
     assert config["markets"][0]["sgo_line"] == 8.5
 
-    # clearing the flag admits the row, but PLAYER_UNKNOWN is still refused
+    # a reviewed CSV syncs approvals, but PLAYER_UNKNOWN is still refused
     for row in written:
         row["needs_review"] = ""
     reviewed = os.path.join(directory, "reviewed.csv")
@@ -1029,16 +1036,22 @@ def test_csv_review_roundtrip():
         writer = csv.DictWriter(handle, fieldnames=discover.CSV_COLUMNS)
         writer.writeheader()
         writer.writerows(written)
-    with contextlib.redirect_stdout(io.StringIO()):
-        discover.build_config(argparse.Namespace(
-            csv=reviewed, out=out_path, include_flagged=False))
-    config = json.load(open(out_path))
-    tickers = [m["ticker"] for m in config["markets"]]
-    assert "BBB" not in tickers, "PLAYER_UNKNOWN leaked into a runnable config"
-    by_ticker = {m["ticker"]: m for m in config["markets"]}
-    assert "CCC" in by_ticker and by_ticker["CCC"].get("sgo_invert") is True
-    print("PASS CSV review roundtrip (flagged first, build skips flagged, "
-          "PLAYER_UNKNOWN refused, invert preserved)")
+    approve_connection = FakeDiscoveryConnection()
+    discovery_store.open_store = lambda url=None: discovery_store.DiscoveryStore(
+        approve_connection)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            discover.approve_from_csv(argparse.Namespace(
+                csv=reviewed, reviewer="test"))
+    finally:
+        discovery_store.open_store = original_open_store
+    approved_tickers = [parameters[1]
+                        for parameters in approve_connection.approvals]
+    assert "BBB" not in approved_tickers, (
+        "PLAYER_UNKNOWN must never be approved from a CSV")
+    assert "AAA" in approved_tickers and "CCC" in approved_tickers
+    print("PASS CSV review roundtrip (flagged first, db build, "
+          "PLAYER_UNKNOWN refused at approval)")
 
 
 class RecordingCursor:
@@ -1208,31 +1221,12 @@ class FakePlayersConnection:
         self.commits += 1
 
 
-def test_json_player_id_map_roundtrip():
-    import os, tempfile
-    import player_id_map
-    path = os.path.join(tempfile.mkdtemp(), "map.json")
-
-    store = player_id_map.JsonPlayerIdMap(path)
-    assert store.backend == "json" and len(store) == 0
-    store.record("LADSOHTANI17", "SHOHEI_OHTANI_1_MLB", match_score=1.0)
-    assert store["LADSOHTANI17"] == "SHOHEI_OHTANI_1_MLB"
-    assert "LADSOHTANI17" in store
-    assert not os.path.exists(path), "record must not write until flush"
-    store.flush()
-
-    reopened = player_id_map.JsonPlayerIdMap(path)
-    assert reopened["LADSOHTANI17"] == "SHOHEI_OHTANI_1_MLB"
-    reopened.record("LADSOHTANI17", "SHOHEI_OHTANI_1_MLB")
-    assert reopened.dirty is False, "recording the same value is not a change"
-    print("PASS json player id map (record, flush, reopen)")
-
 
 def test_postgres_player_id_map_records_provenance():
     import player_id_map
     connection = FakePlayersConnection({"EXISTING1": "EXISTING_ENTITY_1_MLB"})
     store = player_id_map.PostgresPlayerIdMap(connection)
-    assert store.backend == "postgres"
+    assert isinstance(store, player_id_map.PostgresPlayerIdMap)
     assert store["EXISTING1"] == "EXISTING_ENTITY_1_MLB"
 
     store.record("ATHTSODERSTROM21", "TYLER_SODERSTROM_1_MLB",
@@ -1249,22 +1243,6 @@ def test_postgres_player_id_map_records_provenance():
     assert "ON CONFLICT (kalshi_code) DO UPDATE" in upsert
     print("PASS postgres player id map (loads, upserts, records provenance)")
 
-
-def test_player_id_map_falls_back_without_database():
-    import os, tempfile
-    import player_id_map
-    path = os.path.join(tempfile.mkdtemp(), "map.json")
-    saved = os.environ.pop("DATABASE_URL", None)
-    try:
-        assert player_id_map.open_player_id_map(path=path).backend == "json"
-        os.environ["DATABASE_URL"] = "postgresql://127.0.0.1:1/nothing_here"
-        fallback = player_id_map.open_player_id_map(path=path)
-        assert fallback.backend == "json", "unreachable database must fall back"
-    finally:
-        os.environ.pop("DATABASE_URL", None)
-        if saved is not None:
-            os.environ["DATABASE_URL"] = saved
-    print("PASS player id map falls back to json without a database")
 
 
 def test_player_id_map_warns_on_remap():
@@ -1386,6 +1364,58 @@ def make_recorder(connection=None, **kwargs):
     return instance
 
 
+def test_tick_heartbeat_excluded_from_event_log():
+    import logging
+    import market_maker
+    market_maker._recent_log.clear()
+    capture = market_maker._LogCapture()
+    capture.setFormatter(logging.Formatter("%(message)s"))
+    for logger_name, message in (
+            ("market_maker", "FILL yes x5 @ 41c"),
+            ("market_maker.tick", "TOTAL-9 52.5c inv+0 $+0.00"),
+            ("market_maker.tick", "TOTAL-9 52.6c inv+0 $+0.00"),
+            ("sgo_fairvalue", "SGO fair live: 44.6c YES")):
+        record = logging.LogRecord(logger_name, logging.INFO, __file__, 1,
+                                   message, (), None)
+        capture.emit(record)
+    lines = market_maker.recent_log_lines()
+    assert "FILL yes x5 @ 41c" in lines
+    assert "SGO fair live: 44.6c YES" in lines
+    assert not any("inv+0" in line for line in lines), (
+        "per-tick heartbeat must not reach the event log")
+    market_maker._recent_log.clear()
+    print("PASS per-tick heartbeat is excluded from the dashboard event log")
+
+
+def test_quote_pair_surfaces_model_internals():
+    import math
+    import quoting
+    from order_book import OrderBook
+    book = OrderBook("T")
+    book.apply_snapshot({"yes": [[42, 500], [41, 300]],
+                         "no": [[55, 400], [54, 200]]})
+    config = quoting.QuoteConfig(risk_aversion=0.3, fill_intensity_decay=50.0,
+                                 quote_size=5, max_inventory=20)
+    sigma, tau, inventory = 0.0084, 1800.0, 3
+    quotes = quoting.compute_quotes(book, inventory, sigma, tau, config, 0.45)
+
+    fair = quoting.blended_fair_probability(book, config, 0.45)
+    variance = sigma ** 2 * tau
+    expected_reservation = (fair - inventory * 0.3 * variance) * 100
+    raw_half = (0.5 * 0.3 * variance
+                + math.log(1 + 0.3 / 50.0) / 0.3)
+    expected_half = min(max(raw_half, config.min_half_spread_cents / 100),
+                        config.max_half_spread_cents / 100) * 100
+    assert abs(quotes.blended_fair_cents - fair * 100) < 1e-3
+    assert abs(quotes.reservation_cents - expected_reservation) < 1e-3
+    assert abs(quotes.half_spread_cents - expected_half) < 1e-3
+
+    bare = quoting.QuotePair(41, 5, 46, 5)
+    assert bare.blended_fair_cents is None
+    print("PASS QuotePair surfaces blended fair, reservation and half "
+          "spread matching the model")
+
+
 def test_recorder_queue_is_bounded_and_drops_oldest():
     instance = make_recorder(queue_limit=100)
     for index in range(1000):
@@ -1398,19 +1428,40 @@ def test_recorder_queue_is_bounded_and_drops_oldest():
 
 
 def test_recorder_never_raises_from_the_trading_loop():
-    import recorder
     instance = make_recorder()
     instance.record_book("T", time.time(), object())
     instance.record_quote("T", time.time(), None, 0, None, None, None)
     instance.record_fair_value("T", time.time(), None)
     instance.record_fair_value("T", time.time(), object())
     instance.submit("book_snapshots", "T", (1,))
-
-    disabled = recorder.Recorder("prod", False, url="")
-    assert disabled.enabled is False
-    disabled.record_book("T", time.time(), object())
-    assert len(disabled.pending) == 0, "disabled recorder must queue nothing"
     print("PASS recorder never raises from the trading loop")
+
+
+def test_database_is_mandatory():
+    import os
+    import recorder
+    import discovery_store
+    import player_id_map
+    saved = os.environ.pop("DATABASE_URL", None)
+    try:
+        try:
+            recorder.Recorder("prod", False)
+            assert False, "a recorder without DATABASE_URL must refuse"
+        except RuntimeError:
+            pass
+        for opener in (discovery_store.open_store,
+                       player_id_map.open_player_id_map):
+            try:
+                opener()
+                assert False, f"{opener.__name__} must require DATABASE_URL"
+            except RuntimeError:
+                pass
+    finally:
+        if saved is not None:
+            os.environ["DATABASE_URL"] = saved
+    assert not hasattr(player_id_map, "JsonPlayerIdMap")
+    assert not hasattr(player_id_map, "save_id_map")
+    print("PASS the database is mandatory and the JSON fallback is gone")
 
 
 def test_recorder_writes_grouped_batches():
@@ -1420,8 +1471,8 @@ def test_recorder_writes_grouped_batches():
         instance.submit("book_snapshots", "KXMLBTOTAL-26JUL212140ATHAZ-9",
                         (index, 42, 45, 43.5, 43.4, 3, 500, 400))
         instance.submit("quotes", "KXMLBTOTAL-26JUL212140ATHAZ-9",
-                        (index, 41, 46, 5, 0, 0.001, 1800.0, None, None,
-                         None, None))
+                        (index, 41, 46, 5, 0, 0.001, 1800.0, None, 43.67,
+                         33.17, 3.9))
     instance.flush_once()
     connection = instance.connection
     assert len(connection.rows["book_snapshots"]) == 3
@@ -1447,7 +1498,6 @@ def test_recorder_resolves_each_market_once():
 
 
 def test_recorder_survives_write_failure():
-    import recorder
     connection = FakeRecorderConnection(fail_on="INSERT INTO book_snapshots")
     instance = make_recorder(connection)
     instance.submit("book_snapshots", "T", (1, 1, 2, 1.5, 1.5, 1, 10, 10))
@@ -1456,20 +1506,84 @@ def test_recorder_survives_write_failure():
         assert False, "flush_once should surface the failure to run()"
     except RuntimeError:
         pass
+    assert len(instance.pending) == 1, "the failed batch must be requeued"
+    assert instance.pending[0][2][0] == 1, "the requeued row is the original"
     instance.disconnect()
-    assert instance.connection is None and instance.session_id is None
+    assert instance.connection is None
+    assert instance.session_id == 7, "the session survives a disconnect"
     assert connection.closed
     instance.submit("book_snapshots", "T", (2, 1, 2, 1.5, 1.5, 1, 10, 10))
-    assert len(instance.pending) == 1, "recorder keeps queueing after failure"
-    print("PASS recorder survives a write failure and keeps queueing")
+    assert len(instance.pending) == 2, "recorder keeps queueing after failure"
+    print("PASS recorder survives a write failure, requeues the batch and "
+          "keeps its session")
 
 
-def test_recorder_disabled_without_database_url():
+def test_recorder_requeue_respects_the_queue_bound():
+    instance = make_recorder(queue_limit=5)
+    batch = [("book_snapshots", "T", (index,)) for index in range(5)]
+    for index in range(3):
+        instance.submit("book_snapshots", "T", (100 + index,))
+    instance.requeue(batch)
+    assert len(instance.pending) == 5
+    assert instance.dropped == 3, "overflow from the batch is counted dropped"
+    order = [values[0] for _table, _ticker, values in instance.pending]
+    assert order == [3, 4, 100, 101, 102], (
+        "newest of the batch precede rows queued during the outage")
+    print("PASS requeue respects the queue bound and drops the oldest")
+
+
+def test_recorder_reuses_its_session_across_reconnects():
+    import db as db_module
     import recorder
-    instance = recorder.Recorder("prod", False, url="")
-    assert instance.enabled is False
-    asyncio.run(instance.run())
-    print("PASS recorder run exits immediately when disabled")
+    connections = []
+
+    class ReconnectCursor(FakeRecorderCursor):
+        def execute(self, statement, parameters=None):
+            if statement.strip().startswith("SELECT 1 FROM sessions"):
+                self.connection.statements.append((statement, parameters))
+                self.result = (1,)
+                return
+            super().execute(statement, parameters)
+
+    class ReconnectConnection(FakeRecorderConnection):
+        def cursor(self):
+            return ReconnectCursor(self)
+
+    def fake_connect(url):
+        connection = ReconnectConnection()
+        connections.append(connection)
+        return connection
+
+    saved = db_module.connect
+    db_module.connect = fake_connect
+    try:
+        instance = recorder.Recorder("prod", False, url="postgresql:///fake")
+        instance.open_connection()
+        first_session = instance.session_id
+        assert first_session is not None
+        instance.disconnect()
+        instance.open_connection()
+        assert instance.session_id == first_session
+        session_inserts = [
+            statement for connection in connections
+            for statement, _parameters in connection.statements
+            if "INSERT INTO sessions" in statement]
+        assert len(session_inserts) == 1, (
+            "a reconnect must not create a second session")
+    finally:
+        db_module.connect = saved
+    print("PASS recorder reuses its session across reconnects")
+
+
+def test_recorder_final_flush_closes_the_session():
+    instance = make_recorder(FakeRecorderConnection())
+    instance.submit("book_snapshots", "T", (1, 1, 2, 1.5, 1.5, 1, 10, 10))
+    instance.final_flush()
+    assert instance.session_closed, "final_flush must close the session"
+    assert instance.connection is None
+    instance.final_flush()
+    print("PASS final flush closes the session once and is idempotent")
+
 
 
 class FakeDiscoveryCursor:
@@ -1621,20 +1735,6 @@ def test_approved_entries_shape_and_filters():
     assert "PLAYER_UNKNOWN" in query, "unresolved players must be excluded"
     print("PASS approved entries carry line and invert, filtering unresolved")
 
-
-def test_discovery_store_absent_without_database():
-    import os
-    import discovery_store
-    saved = os.environ.pop("DATABASE_URL", None)
-    try:
-        assert discovery_store.open_store() is None
-        os.environ["DATABASE_URL"] = "postgresql://127.0.0.1:1/nothing"
-        assert discovery_store.open_store() is None
-    finally:
-        os.environ.pop("DATABASE_URL", None)
-        if saved is not None:
-            os.environ["DATABASE_URL"] = saved
-    print("PASS discovery store is absent without a reachable database")
 
 
 class RecordingObserver:

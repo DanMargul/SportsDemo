@@ -150,44 +150,13 @@ def write_entries(entries, path):
 
 
 def build_config(args):
-    if getattr(args, "from_db", False):
-        return build_config_from_database(args)
-    with open(args.csv) as handle:
-        rows = list(csv.DictReader(handle))
-    kept, skipped = [], []
-    for row in rows:
-        if row.get("needs_review", "").strip() and not args.include_flagged:
-            skipped.append(row)
-            continue
-        entry = {"ticker": row["ticker"].strip(),
-                 "sgo_event": row["sgo_event"].strip(),
-                 "sgo_odd": row["sgo_odd"].strip()}
-        if not (entry["ticker"] and entry["sgo_event"] and entry["sgo_odd"]):
-            skipped.append(row)
-            continue
-        if "PLAYER_UNKNOWN" in entry["sgo_odd"]:
-            skipped.append(row)
-            continue
-        if row.get("sgo_line", "").strip():
-            entry["sgo_line"] = float(row["sgo_line"])
-        if row.get("sgo_invert", "").strip().upper() in {"TRUE", "1", "YES"}:
-            entry["sgo_invert"] = True
-        kept.append(entry)
-    if not kept:
-        raise SystemExit(
-            f"no usable rows in {args.csv} "
-            f"({len(skipped)} skipped; clear the needs_review column on rows "
-            f"you have checked, or pass --include-flagged)")
-    config = {"defaults": dict(DEFAULT_CONFIG_DEFAULTS), "markets": kept}
-    json.dump(config, open(args.out, "w"), indent=2)
-    print(f"wrote {len(kept)} markets to {args.out} ({len(skipped)} skipped)")
+    return build_config_from_database(args)
+
 
 
 def _record_entries(entries):
     import discovery_store
     store = discovery_store.open_store()
-    if store is None:
-        return
     try:
         store.record_all(entries)
         print(f"database: {store.markets_written} markets, "
@@ -200,9 +169,6 @@ def _record_entries(entries):
 def build_config_from_database(args):
     import discovery_store
     store = discovery_store.open_store()
-    if store is None:
-        raise SystemExit("--from-db needs DATABASE_URL and a reachable "
-                         "database")
     try:
         entries = store.approved_entries()
     finally:
@@ -219,8 +185,6 @@ def build_config_from_database(args):
 def approve_from_csv(args):
     import discovery_store
     store = discovery_store.open_store()
-    if store is None:
-        raise SystemExit("approve needs DATABASE_URL and a reachable database")
     try:
         with open(args.csv) as handle:
             rows = list(csv.DictReader(handle))
@@ -235,15 +199,8 @@ def approve_from_csv(args):
 
 def _persist_id_map():
     id_map = getattr(_id_map, "_cache", None)
-    if id_map is None:
-        return
-    if hasattr(id_map, "flush"):
-        id_map.flush()
-    elif id_map:
-        from player_id_map import save_id_map
-        save_id_map(id_map)
-    print(f"player ID map: {len(id_map)} entries "
-          f"({getattr(id_map, 'backend', 'json')})")
+    if id_map is not None:
+        print(f"player ID map: {len(id_map)} entries")
 
 
 def list_families(args):
@@ -278,9 +235,9 @@ def _id_map():
 def propose(args):
     if "-" not in args.ticker:
         print(f"'{args.ticker}' looks like a series prefix, not a full ticker.")
-        print(f"To match every market in that series, use scan:")
+        print("To match every market in that series, use scan:")
         print(f"    python discover.py scan --series {args.ticker} --out draft.json")
-        print(f"To match one market, pass its full ticker, e.g.:")
+        print("To match one market, pass its full ticker, e.g.:")
         print(f"    python discover.py propose {args.ticker}-<GAME>-<SUFFIX>")
         return None
     parsed = parse_ticker(args.ticker)
@@ -310,7 +267,7 @@ def propose_against(ticker, parsed, events, id_map):
     event_matches = rank_events(parsed, events)
     best_event = event_matches[0]
 
-    print(f"\n  top event candidates:")
+    print("\n  top event candidates:")
     for match in event_matches[:3]:
         marker = " <-- best" if match is best_event else ""
         print(f"    {match.sgo_event_id:20} conf={match.confidence}"
@@ -331,7 +288,7 @@ def propose_against(ticker, parsed, events, id_map):
             resolve_player(parsed.player_code,
                            ticker_codes_for(parsed.league, parsed.team_codes),
                            parsed.family.sgo_stat_id, event_odds, id_map)
-        print(f"\n  player resolution:")
+        print("\n  player resolution:")
         print(f"    {parsed.player_code} -> {player_entity} "
               f"(score {player_score}, {player_source})")
         for concern in player_concerns:
@@ -342,7 +299,7 @@ def propose_against(ticker, parsed, events, id_map):
 
     odd = match_odd(parsed, event_odds, player_entity=player_entity)
 
-    print(f"\n  proposed odd mapping:")
+    print("\n  proposed odd mapping:")
     print(f"    oddID  : {odd.sgo_odd_id}")
     print(f"    line   : {odd.sgo_line}   invert: {odd.invert}")
     for item in odd.evidence:
@@ -488,10 +445,6 @@ def main():
 
     build_parser = commands.add_parser(
         "build", help="turn a reviewed CSV into a runnable markets.json")
-    build_parser.add_argument("csv", nargs="?")
-    build_parser.add_argument("--from-db", action="store_true",
-                              help="read approved mappings from the database "
-                                   "instead of a CSV")
     build_parser.add_argument("--out", default="markets.json")
     build_parser.add_argument("--include-flagged", action="store_true",
                               help="include rows still marked needs_review")
