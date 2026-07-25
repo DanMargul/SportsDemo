@@ -9,7 +9,7 @@ https://github.com/user-attachments/assets/502fc4e5-4150-45b1-831e-a4c9c4093df6
 
 This is a minimal example of a live market-making session:
 
-    python market_maker.py <KALSHI_TICKER> --live 
+    sports-marketmaker <KALSHI_TICKER> --live 
 
 Note: Run without `--live` to prevent placing orders. Whether or not real orders will be placed, the user must have a Kalshi account with an API key and a private key file. They must be declared as environment variables:
 
@@ -18,7 +18,7 @@ Note: Run without `--live` to prevent placing orders. Whether or not real orders
 
 As demonstrated in the screen recording above, a live market making session can be initiated with many more arguments:
 
-    python market_maker.py --live <KALSHI_TICKER> --sgo-event <EVENT_ID> --sgo-odd <ODD_ID> --sgo-line <LINE> --duration-minutes <SESSION_LENGTH_MINUTES> --data-interval-seconds <MARKET_DATA_REFRESH_INTERVAL_SECONDS> --quote-size <MAXIMUM_SIZE_ORDER>
+    sports-marketmaker --live <KALSHI_TICKER> --sgo-event <EVENT_ID> --sgo-odd <ODD_ID> --sgo-line <LINE> --duration-minutes <SESSION_LENGTH_MINUTES> --data-interval-seconds <MARKET_DATA_REFRESH_INTERVAL_SECONDS> --quote-size <MAXIMUM_SIZE_ORDER>
 
 If any of {`--sgo-event`, `--sgo-odd`, `--sgo-line`} are used, a SportsGameOdds API key is required:
 
@@ -26,7 +26,7 @@ If any of {`--sgo-event`, `--sgo-odd`, `--sgo-line`} are used, a SportsGameOdds 
 
 The session can be visualized if `python market_maker.py` is run with the argument `--state-file <STATE_FILE_PATH>`. In a separate terminal:
 
-    python dashboard.py --state-file <STATE_FILE_PATH>
+    sports-dashboard --state-file <STATE_FILE_PATH>
 
 
 ## Capabilities
