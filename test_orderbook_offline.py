@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import tempfile
@@ -1315,6 +1316,155 @@ def test_resolve_player_accepts_store_or_dict():
         {"LADSOHTANI17": "SHOHEI_OHTANI_1_MLB"})
     assert entity == "SHOHEI_OHTANI_1_MLB" and source == "id-map"
     print("PASS resolve_player works with a store or a plain dict")
+
+
+class FakeRecorderCursor:
+    def __init__(self, connection):
+        self.connection = connection
+        self.result = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exception):
+        return False
+
+    def execute(self, statement, parameters=None):
+        if self.connection.fail_on and self.connection.fail_on in statement:
+            raise RuntimeError("simulated database failure")
+        self.connection.statements.append((statement, parameters))
+        if "INSERT INTO sessions" in statement:
+            self.result = (7,)
+        elif "INSERT INTO markets" in statement:
+            self.connection.markets.setdefault(parameters[0],
+                                               len(self.connection.markets) + 1)
+            self.result = (self.connection.markets[parameters[0]],)
+
+    def executemany(self, statement, rows):
+        if self.connection.fail_on and self.connection.fail_on in statement:
+            raise RuntimeError("simulated database failure")
+        table = statement.split("INSERT INTO ")[1].split(" ")[0]
+        self.connection.rows.setdefault(table, []).extend(rows)
+
+    def fetchone(self):
+        return self.result
+
+
+class FakeRecorderConnection:
+    def __init__(self, fail_on=None):
+        self.statements = []
+        self.rows = {}
+        self.markets = {}
+        self.commits = 0
+        self.closed = False
+        self.fail_on = fail_on
+
+    def cursor(self):
+        return FakeRecorderCursor(self)
+
+    def commit(self):
+        self.commits += 1
+
+    def close(self):
+        self.closed = True
+
+
+def make_recorder(connection=None, **kwargs):
+    import recorder
+    instance = recorder.Recorder("prod", False,
+                                 url="postgresql:///fake", **kwargs)
+    if connection is not None:
+        instance.open_connection = lambda: (
+            setattr(instance, "connection", connection),
+            setattr(instance, "session_id", 7),
+            setattr(instance, "market_ids", {}))
+    return instance
+
+
+def test_recorder_queue_is_bounded_and_drops_oldest():
+    instance = make_recorder(queue_limit=100)
+    for index in range(1000):
+        instance.submit("book_snapshots", "T", (index,))
+    assert len(instance.pending) == 100
+    assert instance.dropped == 900
+    assert instance.pending[-1][2][0] == 999, "newest row must be kept"
+    assert instance.pending[0][2][0] == 900, "oldest rows must be dropped"
+    print("PASS recorder queue is bounded and drops oldest")
+
+
+def test_recorder_never_raises_from_the_trading_loop():
+    import recorder
+    instance = make_recorder()
+    instance.record_book("T", time.time(), object())
+    instance.record_quote("T", time.time(), None, 0, None, None, None)
+    instance.record_fair_value("T", time.time(), None)
+    instance.record_fair_value("T", time.time(), object())
+    instance.submit("book_snapshots", "T", (1,))
+
+    disabled = recorder.Recorder("prod", False, url="")
+    assert disabled.enabled is False
+    disabled.record_book("T", time.time(), object())
+    assert len(disabled.pending) == 0, "disabled recorder must queue nothing"
+    print("PASS recorder never raises from the trading loop")
+
+
+def test_recorder_writes_grouped_batches():
+    instance = make_recorder(FakeRecorderConnection())
+    instance.track_market("KXMLBTOTAL-26JUL212140ATHAZ-9")
+    for index in range(3):
+        instance.submit("book_snapshots", "KXMLBTOTAL-26JUL212140ATHAZ-9",
+                        (index, 42, 45, 43.5, 43.4, 3, 500, 400))
+        instance.submit("quotes", "KXMLBTOTAL-26JUL212140ATHAZ-9",
+                        (index, 41, 46, 5, 0, 0.001, 1800.0, None, None,
+                         None, None))
+    instance.flush_once()
+    connection = instance.connection
+    assert len(connection.rows["book_snapshots"]) == 3
+    assert len(connection.rows["quotes"]) == 3
+    assert instance.written == 6 and not instance.pending
+    assert connection.rows["quotes"][0][0] == 7, "session id is prepended"
+    assert connection.rows["book_snapshots"][0][0] == 1, "market id prepended"
+    inserted = " ".join(statement for statement, _p in connection.statements)
+    assert "INSERT INTO markets" in inserted
+    print("PASS recorder writes grouped batches with resolved ids")
+
+
+def test_recorder_resolves_each_market_once():
+    instance = make_recorder(FakeRecorderConnection())
+    for index in range(5):
+        instance.submit("book_snapshots", "SAME", (index, 1, 2, 1.5, 1.5, 1,
+                                                   10, 10))
+    instance.flush_once()
+    upserts = [s for s, _p in instance.connection.statements
+               if "INSERT INTO markets" in s]
+    assert len(upserts) == 1, "market id must be cached after first resolve"
+    print("PASS recorder resolves each market once per connection")
+
+
+def test_recorder_survives_write_failure():
+    import recorder
+    connection = FakeRecorderConnection(fail_on="INSERT INTO book_snapshots")
+    instance = make_recorder(connection)
+    instance.submit("book_snapshots", "T", (1, 1, 2, 1.5, 1.5, 1, 10, 10))
+    try:
+        instance.flush_once()
+        assert False, "flush_once should surface the failure to run()"
+    except RuntimeError:
+        pass
+    instance.disconnect()
+    assert instance.connection is None and instance.session_id is None
+    assert connection.closed
+    instance.submit("book_snapshots", "T", (2, 1, 2, 1.5, 1.5, 1, 10, 10))
+    assert len(instance.pending) == 1, "recorder keeps queueing after failure"
+    print("PASS recorder survives a write failure and keeps queueing")
+
+
+def test_recorder_disabled_without_database_url():
+    import recorder
+    instance = recorder.Recorder("prod", False, url="")
+    assert instance.enabled is False
+    asyncio.run(instance.run())
+    print("PASS recorder run exits immediately when disabled")
 
 
 def main():
