@@ -5,6 +5,10 @@ In the video below, a market making session is initiated on Kalshi. The market i
 
 https://github.com/user-attachments/assets/502fc4e5-4150-45b1-831e-a4c9c4093df6
 
+## Installation
+
+    pip install -e .
+
 ## How To Run 
 
 This is a minimal example of a live market-making session:
