@@ -1,9 +1,9 @@
 import argparse
 import math
 
-import kalshi
-from order_book import OrderBook
-from quoting import VolatilityEWMA
+from sports_markets import kalshi
+from sports_markets.order_book import OrderBook
+from sports_markets.quoting import VolatilityEWMA
 
 
 def trade_price_cents(trade):

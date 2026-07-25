@@ -3,11 +3,11 @@ import csv
 import json
 import logging
 
-import kalshi
-from market_catalog import MARKET_FAMILIES, parse_ticker, ticker_codes_for
-from event_matcher import rank_events
-from odd_matcher import match_odd
-from sgo_fairvalue import events_in, sgo_get
+from sports_markets import kalshi
+from sports_markets.market_catalog import MARKET_FAMILIES, parse_ticker, ticker_codes_for
+from sports_markets.event_matcher import rank_events
+from sports_markets.odd_matcher import match_odd
+from sports_markets.sgo_fairvalue import events_in, sgo_get
 
 log = logging.getLogger("discover")
 

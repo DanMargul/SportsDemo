@@ -4,8 +4,8 @@ import logging
 
 import websockets
 
-import kalshi
-from order_book import OrderBook
+from sports_markets import kalshi
+from sports_markets.order_book import OrderBook
 
 log = logging.getLogger("market_data_feed")
 

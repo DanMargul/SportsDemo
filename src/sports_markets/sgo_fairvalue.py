@@ -7,7 +7,7 @@ import time
 
 import requests
 
-import devig
+from sports_markets import devig
 
 log = logging.getLogger("sgo_fairvalue")
 

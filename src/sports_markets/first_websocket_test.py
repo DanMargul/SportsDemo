@@ -2,7 +2,7 @@ import asyncio
 import logging
 import sys
 
-from market_data_feed import MarketDataFeed
+from sports_markets.market_data_feed import MarketDataFeed
 
 
 def print_ladder(book):
