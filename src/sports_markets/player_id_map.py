@@ -2,7 +2,7 @@ import json
 import os
 import re
 
-from player_codes import decode_player_code, name_similarity
+from sports_markets.player_codes import decode_player_code, name_similarity
 
 ID_MAP_PATH = "player_id_map.json"
 PLAYER_MATCH_THRESHOLD = 0.7

@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sports-capital"
+version = "0.1.0.dev0"
+description = "Market maker for Kalshi event contracts"
+requires-python = ">=3.12"
+dependencies = [
+    "requests>=2.31",
+    "cryptography>=42.0",
+    "websockets>=12.0",
+    "nicegui>=2.0",
+    "psycopg[binary]>=3.1",
+]
+
+[project.optional-dependencies]
+dev = ["pyflakes>=3.0"]
+
+[project.scripts]
+sports-marketmaker = "sports_capital.market_maker:main"
+sports-discover = "sports_capital.discover:main"
+sports-report = "sports_capital.session_report:main"
+sports-dashboard = "sports_capital.dashboard:main"
+sports-analyze = "sports_capital.analyze:main"
+sports-devig = "sports_capital.devig:main"
+sports-sgo = "sports_capital.sgo_fairvalue:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -3,10 +3,10 @@ import asyncio
 import logging
 import time
 
-import kalshi
-import quoting
-from market_data_feed import MarketDataFeed
-from order_manager import OrderManager
+from sports_markets import kalshi
+from sports_markets import quoting
+from sports_markets.market_data_feed import MarketDataFeed
+from sports_markets.order_manager import OrderManager
 
 log = logging.getLogger("market_maker")
 

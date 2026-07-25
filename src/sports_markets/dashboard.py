@@ -3,7 +3,7 @@ import time
 
 from nicegui import ui
 
-from dashboard_state import DEFAULT_STATE_PATH, read_state
+from sports_markets.dashboard_state import DEFAULT_STATE_PATH, read_state
 
 BACKGROUND = "#0D1520"
 PANEL = "#131F2E"
