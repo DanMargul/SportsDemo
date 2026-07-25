@@ -1169,6 +1169,154 @@ def test_database_url_required():
     print("PASS database url comes from the environment")
 
 
+class FakePlayersCursor:
+    def __init__(self, connection):
+        self.connection = connection
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exception):
+        return False
+
+    def execute(self, statement, parameters=None):
+        self.connection.statements.append((statement, parameters))
+        if statement.strip().upper().startswith("SELECT"):
+            self.rows = [(code, entity) for code, entity
+                         in sorted(self.connection.players.items())]
+        elif "INSERT INTO players" in statement:
+            self.connection.players[parameters[0]] = parameters[1]
+            self.connection.provenance[parameters[0]] = parameters
+            self.rows = []
+
+    def fetchall(self):
+        return self.rows
+
+
+class FakePlayersConnection:
+    def __init__(self, players=None):
+        self.players = dict(players or {})
+        self.provenance = {}
+        self.statements = []
+        self.commits = 0
+
+    def cursor(self):
+        return FakePlayersCursor(self)
+
+    def commit(self):
+        self.commits += 1
+
+
+def test_json_player_id_map_roundtrip():
+    import os, tempfile
+    import player_id_map
+    path = os.path.join(tempfile.mkdtemp(), "map.json")
+
+    store = player_id_map.JsonPlayerIdMap(path)
+    assert store.backend == "json" and len(store) == 0
+    store.record("LADSOHTANI17", "SHOHEI_OHTANI_1_MLB", match_score=1.0)
+    assert store["LADSOHTANI17"] == "SHOHEI_OHTANI_1_MLB"
+    assert "LADSOHTANI17" in store
+    assert not os.path.exists(path), "record must not write until flush"
+    store.flush()
+
+    reopened = player_id_map.JsonPlayerIdMap(path)
+    assert reopened["LADSOHTANI17"] == "SHOHEI_OHTANI_1_MLB"
+    reopened.record("LADSOHTANI17", "SHOHEI_OHTANI_1_MLB")
+    assert reopened.dirty is False, "recording the same value is not a change"
+    print("PASS json player id map (record, flush, reopen)")
+
+
+def test_postgres_player_id_map_records_provenance():
+    import player_id_map
+    connection = FakePlayersConnection({"EXISTING1": "EXISTING_ENTITY_1_MLB"})
+    store = player_id_map.PostgresPlayerIdMap(connection)
+    assert store.backend == "postgres"
+    assert store["EXISTING1"] == "EXISTING_ENTITY_1_MLB"
+
+    store.record("ATHTSODERSTROM21", "TYLER_SODERSTROM_1_MLB",
+                 display_name="T. Soderstrom", team_code="ATH",
+                 jersey_number="21", match_score=1.0,
+                 match_source="matched-in-event", source_event_id="EV_ATHAZ")
+    assert store["ATHTSODERSTROM21"] == "TYLER_SODERSTROM_1_MLB"
+    assert connection.commits >= 1
+    recorded = connection.provenance["ATHTSODERSTROM21"]
+    assert "T. Soderstrom" in recorded and "ATH" in recorded
+    assert "matched-in-event" in recorded and "EV_ATHAZ" in recorded
+    upsert = [statement for statement, _p in connection.statements
+              if "INSERT INTO players" in statement][0]
+    assert "ON CONFLICT (kalshi_code) DO UPDATE" in upsert
+    print("PASS postgres player id map (loads, upserts, records provenance)")
+
+
+def test_player_id_map_falls_back_without_database():
+    import os, tempfile
+    import player_id_map
+    path = os.path.join(tempfile.mkdtemp(), "map.json")
+    saved = os.environ.pop("DATABASE_URL", None)
+    try:
+        assert player_id_map.open_player_id_map(path=path).backend == "json"
+        os.environ["DATABASE_URL"] = "postgresql://127.0.0.1:1/nothing_here"
+        fallback = player_id_map.open_player_id_map(path=path)
+        assert fallback.backend == "json", "unreachable database must fall back"
+    finally:
+        os.environ.pop("DATABASE_URL", None)
+        if saved is not None:
+            os.environ["DATABASE_URL"] = saved
+    print("PASS player id map falls back to json without a database")
+
+
+def test_player_id_map_warns_on_remap():
+    import logging
+    import player_id_map
+    connection = FakePlayersConnection({"LADSOHTANI17": "SHOHEI_OHTANI_1_MLB"})
+    store = player_id_map.PostgresPlayerIdMap(connection)
+    messages = []
+    handler = logging.Handler()
+    handler.emit = lambda record: messages.append(record.getMessage())
+    player_id_map.log.addHandler(handler)
+    try:
+        store.record("LADSOHTANI17", "SOMEONE_ELSE_1_MLB")
+        store.record("LADSOHTANI17", "SOMEONE_ELSE_1_MLB")
+    finally:
+        player_id_map.log.removeHandler(handler)
+    assert any("was mapped to" in message for message in messages)
+    assert len([m for m in messages if "was mapped to" in m]) == 1
+    print("PASS player id map warns when a code remaps to a new entity")
+
+
+def test_import_json_into_postgres_is_idempotent():
+    import json, os, tempfile
+    import player_id_map
+    path = os.path.join(tempfile.mkdtemp(), "legacy.json")
+    json.dump({"A1": "ENTITY_A", "B2": "ENTITY_B"}, open(path, "w"))
+    connection = FakePlayersConnection()
+    imported, total = player_id_map.import_json_into_postgres(connection, path)
+    assert (imported, total) == (2, 2)
+    again, total_again = player_id_map.import_json_into_postgres(connection,
+                                                                 path)
+    assert (again, total_again) == (0, 2), "re-import must be a no-op"
+    print("PASS json import into postgres is idempotent")
+
+
+def test_resolve_player_accepts_store_or_dict():
+    import player_id_map
+    event_odds = {
+        "batting_hits+runs+rbi-SHOHEI_OHTANI_1_MLB-game-ou-over":
+            {"marketName": "Shohei Ohtani Hits + Runs + RBIs"}}
+    connection = FakePlayersConnection({"LADSOHTANI17": "SHOHEI_OHTANI_1_MLB"})
+    store = player_id_map.PostgresPlayerIdMap(connection)
+    entity, score, source, _concerns = player_id_map.resolve_player(
+        "LADSOHTANI17", {"LAD"}, "batting_hits+runs+rbi", {}, store)
+    assert entity == "SHOHEI_OHTANI_1_MLB" and source == "id-map"
+
+    entity, score, source, _concerns = player_id_map.resolve_player(
+        "LADSOHTANI17", {"LAD"}, "batting_hits+runs+rbi", event_odds,
+        {"LADSOHTANI17": "SHOHEI_OHTANI_1_MLB"})
+    assert entity == "SHOHEI_OHTANI_1_MLB" and source == "id-map"
+    print("PASS resolve_player works with a store or a plain dict")
+
+
 def main():
     tests = [function for name, function in sorted(globals().items())
              if name.startswith("test_") and callable(function)]

@@ -125,6 +125,13 @@ def run_status(args):
     print(f"{len(rows)} migrations, {outstanding} pending")
 
 
+def run_import_players(args):
+    from player_id_map import import_json_into_postgres
+    with connect(args.url) as connection:
+        imported, total = import_json_into_postgres(connection, args.path)
+    print(f"imported {imported} of {total} players from {args.path}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Schema migrations for the kalshi-mm database. Set "
@@ -137,6 +144,10 @@ def main():
     status_parser = commands.add_parser("status",
                                         help="show applied and pending")
     status_parser.set_defaults(func=run_status)
+    import_parser = commands.add_parser(
+        "import-players", help="load player_id_map.json into the players table")
+    import_parser.add_argument("--path", default="player_id_map.json")
+    import_parser.set_defaults(func=run_import_players)
     args = parser.parse_args()
     args.func(args)
 

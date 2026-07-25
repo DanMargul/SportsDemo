@@ -182,10 +182,15 @@ def build_config(args):
 
 def _persist_id_map():
     id_map = getattr(_id_map, "_cache", None)
-    if id_map:
+    if id_map is None:
+        return
+    if hasattr(id_map, "flush"):
+        id_map.flush()
+    elif id_map:
         from player_id_map import save_id_map
         save_id_map(id_map)
-        print(f"player ID map updated ({len(id_map)} entries cached)")
+    print(f"player ID map: {len(id_map)} entries "
+          f"({getattr(id_map, 'backend', 'json')})")
 
 
 def list_families(args):
@@ -211,8 +216,8 @@ def fetch_sgo_events(league, search):
 def _id_map():
     cache = getattr(_id_map, "_cache", None)
     if cache is None:
-        from player_id_map import load_id_map
-        cache = load_id_map()
+        from player_id_map import open_player_id_map
+        cache = open_player_id_map()
         _id_map._cache = cache
     return cache
 
@@ -279,7 +284,8 @@ def propose_against(ticker, parsed, events, id_map):
         for concern in player_concerns:
             print(f"    ! {concern}")
         if player_entity and player_source != "id-map":
-            id_map[parsed.player_code] = player_entity
+            record_resolved_player(id_map, parsed, player_entity, player_score,
+                                   player_source, best_event.sgo_event_id)
 
     odd = match_odd(parsed, event_odds, player_entity=player_entity)
 
@@ -325,6 +331,25 @@ def propose_against(ticker, parsed, events, id_map):
         "player_score": player_score if parsed.family.has_player else "",
     }
     return entry
+
+
+def record_resolved_player(id_map, parsed, sgo_entity_id, match_score,
+                           match_source, sgo_event_id):
+    if not hasattr(id_map, "record"):
+        id_map[parsed.player_code] = sgo_entity_id
+        return
+    from player_codes import decode_player_code
+    from market_catalog import canonical_team
+    decoded = decode_player_code(
+        parsed.player_code, ticker_codes_for(parsed.league, parsed.team_codes))
+    team_code = (canonical_team(parsed.league, decoded.team)
+                 if decoded.team else None) or decoded.team or None
+    id_map.record(parsed.player_code, sgo_entity_id,
+                  display_name=decoded.display,
+                  team_code=team_code,
+                  jersey_number=decoded.number or None,
+                  match_score=match_score, match_source=match_source,
+                  source_event_id=sgo_event_id)
 
 
 def _decoded_player_display(parsed):
