@@ -78,6 +78,7 @@ def scan(args):
              "markets": [{k: v for k, v in e.items() if k != "_evidence"}
                          for e in entries]}, indent=2))
     _persist_id_map()
+    _record_entries(entries)
 
 
 CSV_COLUMNS = ["ticker", "needs_review", "confidence", "review_notes",
@@ -149,6 +150,8 @@ def write_entries(entries, path):
 
 
 def build_config(args):
+    if getattr(args, "from_db", False):
+        return build_config_from_database(args)
     with open(args.csv) as handle:
         rows = list(csv.DictReader(handle))
     kept, skipped = [], []
@@ -178,6 +181,56 @@ def build_config(args):
     config = {"defaults": dict(DEFAULT_CONFIG_DEFAULTS), "markets": kept}
     json.dump(config, open(args.out, "w"), indent=2)
     print(f"wrote {len(kept)} markets to {args.out} ({len(skipped)} skipped)")
+
+
+def _record_entries(entries):
+    import discovery_store
+    store = discovery_store.open_store()
+    if store is None:
+        return
+    try:
+        store.record_all(entries)
+        print(f"database: {store.markets_written} markets, "
+              f"{store.mappings_written} new mappings, "
+              f"{store.mappings_unchanged} unchanged")
+    finally:
+        store.close()
+
+
+def build_config_from_database(args):
+    import discovery_store
+    store = discovery_store.open_store()
+    if store is None:
+        raise SystemExit("--from-db needs DATABASE_URL and a reachable "
+                         "database")
+    try:
+        entries = store.approved_entries()
+    finally:
+        store.close()
+    if not entries:
+        raise SystemExit(
+            "no approved mappings; review the draft and run "
+            "'discover.py approve <csv>' or approve rows by hand")
+    config = {"defaults": dict(DEFAULT_CONFIG_DEFAULTS), "markets": entries}
+    json.dump(config, open(args.out, "w"), indent=2)
+    print(f"wrote {len(entries)} approved markets to {args.out}")
+
+
+def approve_from_csv(args):
+    import discovery_store
+    store = discovery_store.open_store()
+    if store is None:
+        raise SystemExit("approve needs DATABASE_URL and a reachable database")
+    try:
+        with open(args.csv) as handle:
+            rows = list(csv.DictReader(handle))
+        tickers = [row["ticker"].strip() for row in rows
+                   if not row.get("needs_review", "").strip()
+                   and "PLAYER_UNKNOWN" not in row.get("sgo_odd", "")]
+        approved = store.approve(tickers, reviewed_by=args.reviewer)
+    finally:
+        store.close()
+    print(f"approved {approved} mappings from {len(rows)} rows in {args.csv}")
 
 
 def _persist_id_map():
@@ -386,6 +439,7 @@ def draft_config(args):
              "markets": [{k: v for k, v in e.items() if k != "_evidence"}
                          for e in entries]}, indent=2))
     _persist_id_map()
+    _record_entries(entries)
 
 
 def main():
@@ -434,11 +488,20 @@ def main():
 
     build_parser = commands.add_parser(
         "build", help="turn a reviewed CSV into a runnable markets.json")
-    build_parser.add_argument("csv")
+    build_parser.add_argument("csv", nargs="?")
+    build_parser.add_argument("--from-db", action="store_true",
+                              help="read approved mappings from the database "
+                                   "instead of a CSV")
     build_parser.add_argument("--out", default="markets.json")
     build_parser.add_argument("--include-flagged", action="store_true",
                               help="include rows still marked needs_review")
     build_parser.set_defaults(func=build_config)
+
+    approve_parser = commands.add_parser(
+        "approve", help="mark reviewed CSV rows approved in the database")
+    approve_parser.add_argument("csv")
+    approve_parser.add_argument("--reviewer", default=None)
+    approve_parser.set_defaults(func=approve_from_csv)
 
     draft_parser = commands.add_parser(
         "draft", help="emit a draft markets.json for several tickers")

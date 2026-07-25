@@ -238,7 +238,7 @@ def test_dry_run_places_nothing():
     manager = OrderManager(client, "T", 30, 20, dry_run=True)
     manager.sync_quotes(QuotePair(41, 10, 46, 10))
     assert client.calls == []
-    assert manager.resting["bid"][0] == "dry"
+    assert manager.resting["bid"][0]
     print("PASS dry-run (no client calls, resting tracked locally)")
 
 
@@ -1343,7 +1343,12 @@ class FakeRecorderCursor:
     def executemany(self, statement, rows):
         if self.connection.fail_on and self.connection.fail_on in statement:
             raise RuntimeError("simulated database failure")
-        table = statement.split("INSERT INTO ")[1].split(" ")[0]
+        if "INSERT INTO " in statement:
+            table = statement.split("INSERT INTO ")[1].split(" ")[0]
+        elif statement.strip().upper().startswith("UPDATE"):
+            table = "update:" + statement.split()[1]
+        else:
+            table = "other"
         self.connection.rows.setdefault(table, []).extend(rows)
 
     def fetchone(self):
@@ -1465,6 +1470,279 @@ def test_recorder_disabled_without_database_url():
     assert instance.enabled is False
     asyncio.run(instance.run())
     print("PASS recorder run exits immediately when disabled")
+
+
+class FakeDiscoveryCursor:
+    def __init__(self, connection):
+        self.connection = connection
+        self.result = None
+        self.rows = []
+        self.rowcount = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exception):
+        return False
+
+    def execute(self, statement, parameters=None):
+        self.connection.statements.append((statement, parameters))
+        collapsed = " ".join(statement.split())
+        if collapsed.startswith("INSERT INTO games"):
+            self.result = (11,)
+        elif collapsed.startswith("SELECT id FROM players"):
+            self.result = (22,) if self.connection.player_exists else None
+        elif collapsed.startswith("INSERT INTO markets"):
+            self.result = (33,)
+        elif collapsed.startswith("SELECT id, sgo_event_id"):
+            self.result = self.connection.current_mapping
+        elif collapsed.startswith("INSERT INTO sgo_mappings"):
+            self.connection.inserted_mappings.append(parameters)
+            self.result = (44,)
+        elif collapsed.startswith("UPDATE sgo_mappings SET is_current"):
+            self.connection.superseded.append(parameters)
+        elif collapsed.startswith("UPDATE sgo_mappings SET review_state"):
+            self.connection.approvals.append(parameters)
+            self.rowcount = 1
+        elif "FROM sgo_mappings s" in collapsed:
+            self.rows = self.connection.approved_rows
+
+    def fetchone(self):
+        return self.result
+
+    def fetchall(self):
+        return self.rows
+
+
+class FakeDiscoveryConnection:
+    def __init__(self, current_mapping=None, player_exists=True,
+                 approved_rows=None):
+        self.statements = []
+        self.inserted_mappings = []
+        self.superseded = []
+        self.approvals = []
+        self.commits = 0
+        self.current_mapping = current_mapping
+        self.player_exists = player_exists
+        self.approved_rows = approved_rows or []
+
+    def cursor(self):
+        return FakeDiscoveryCursor(self)
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        pass
+
+    def close(self):
+        pass
+
+
+def sample_discovery_entry(**overrides):
+    entry = {"ticker": "KXMLBTOTAL-26JUL212140ATHAZ-9",
+             "sgo_event": "EV_ATHAZ", "sgo_odd": "points-all-game-ou-over",
+             "sgo_line": 8.5, "_confidence": 0.8,
+             "_evidence": {"event_teams": "ATH/ARI",
+                           "event_start": "2026-07-22T01:40:00Z",
+                           "player_entity": ""}}
+    entry.update(overrides)
+    return entry
+
+
+def test_discovery_store_records_full_reference_layer():
+    import discovery_store
+    connection = FakeDiscoveryConnection(player_exists=False)
+    store = discovery_store.DiscoveryStore(connection)
+    store.record(sample_discovery_entry())
+    executed = " ".join(" ".join(statement.split())
+                        for statement, _p in connection.statements)
+    assert "INSERT INTO games" in executed
+    assert "INSERT INTO markets" in executed
+    assert "INSERT INTO sgo_mappings" in executed
+    assert store.markets_written == 1 and store.mappings_written == 1
+    assert connection.commits >= 1
+    print("PASS discovery store records games, markets and mappings")
+
+
+def test_discovery_store_review_state_matches_csv_semantics():
+    import discovery_store
+    clean = FakeDiscoveryConnection()
+    discovery_store.DiscoveryStore(clean).record(sample_discovery_entry())
+    assert clean.inserted_mappings[0][6] == "approved"
+
+    flagged = FakeDiscoveryConnection()
+    discovery_store.DiscoveryStore(flagged).record(
+        sample_discovery_entry(_REVIEW="unresolved player"))
+    assert flagged.inserted_mappings[0][6] == "pending"
+    assert flagged.inserted_mappings[0][7] == "unresolved player"
+    print("PASS discovery store review state matches the CSV convention")
+
+
+def test_identical_rescan_leaves_the_mapping_alone():
+    import discovery_store
+    existing = (99, "EV_ATHAZ", "points-all-game-ou-over", 8.5, False,
+                "approved")
+    connection = FakeDiscoveryConnection(current_mapping=existing)
+    store = discovery_store.DiscoveryStore(connection)
+    store.record(sample_discovery_entry())
+    assert store.mappings_unchanged == 1 and store.mappings_written == 0
+    assert not connection.inserted_mappings, "must not insert a duplicate"
+    assert not connection.superseded, "must not supersede an identical mapping"
+    print("PASS an identical rescan preserves the reviewed mapping")
+
+
+def test_changed_mapping_supersedes_rather_than_overwrites():
+    import discovery_store
+    existing = (99, "EV_ATHAZ", "points-all-game-ou-over", 8.5, False,
+                "approved")
+    connection = FakeDiscoveryConnection(current_mapping=existing)
+    store = discovery_store.DiscoveryStore(connection)
+    store.record(sample_discovery_entry(sgo_line=9.5))
+    assert connection.superseded, "old mapping must be marked not current"
+    assert store.mappings_written == 1
+    assert connection.inserted_mappings[0][6] == "approved"
+    print("PASS a changed mapping supersedes and keeps the old row")
+
+
+def test_approved_entries_shape_and_filters():
+    import discovery_store
+    connection = FakeDiscoveryConnection(approved_rows=[
+        ("TICK-A", "EV1", "points-all-game-ou-over", 8.5, False),
+        ("TICK-B", "EV1", "points-home-game-ml-home", None, True)])
+    entries = discovery_store.DiscoveryStore(connection).approved_entries()
+    assert entries[0] == {"ticker": "TICK-A", "sgo_event": "EV1",
+                          "sgo_odd": "points-all-game-ou-over",
+                          "sgo_line": 8.5}
+    assert entries[1]["sgo_invert"] is True
+    assert "sgo_line" not in entries[1]
+    query = " ".join(" ".join(s.split()) for s, _p in connection.statements)
+    assert "review_state = 'approved'" in query
+    assert "PLAYER_UNKNOWN" in query, "unresolved players must be excluded"
+    print("PASS approved entries carry line and invert, filtering unresolved")
+
+
+def test_discovery_store_absent_without_database():
+    import os
+    import discovery_store
+    saved = os.environ.pop("DATABASE_URL", None)
+    try:
+        assert discovery_store.open_store() is None
+        os.environ["DATABASE_URL"] = "postgresql://127.0.0.1:1/nothing"
+        assert discovery_store.open_store() is None
+    finally:
+        os.environ.pop("DATABASE_URL", None)
+        if saved is not None:
+            os.environ["DATABASE_URL"] = saved
+    print("PASS discovery store is absent without a reachable database")
+
+
+class RecordingObserver:
+    def __init__(self, explode=False):
+        self.events = []
+        self.explode = explode
+
+    def on_order_placed(self, **payload):
+        if self.explode:
+            raise RuntimeError("observer is broken")
+        self.events.append(("placed", payload))
+
+    def on_order_cancelled(self, **payload):
+        if self.explode:
+            raise RuntimeError("observer is broken")
+        self.events.append(("cancelled", payload))
+
+    def on_fill(self, **payload):
+        if self.explode:
+            raise RuntimeError("observer is broken")
+        self.events.append(("fill", payload))
+
+
+def test_order_manager_notifies_observer():
+    from order_manager import OrderManager
+    from quoting import QuotePair
+    observer = RecordingObserver()
+    manager = OrderManager(None, "T", 30, 20, dry_run=True, observer=observer)
+    manager.sync_quotes(QuotePair(41, 5, 46, 5))
+    placed = [payload for name, payload in observer.events if name == "placed"]
+    assert len(placed) == 2
+    assert {entry["book_side"] for entry in placed} == {"bid", "ask"}
+    assert placed[0]["status"] == "dry_run" and placed[0]["order_id"]
+
+    manager.cancel("bid")
+    cancelled = [p for name, p in observer.events if name == "cancelled"]
+    assert len(cancelled) == 1 and cancelled[0]["order_id"]
+
+    manager.apply_fill({"book_side": "bid", "count_fp": "5.00",
+                        "price": "0.41", "trade_id": "TRADE_1"})
+    fills = [payload for name, payload in observer.events if name == "fill"]
+    assert len(fills) == 1
+    assert fills[0]["price_cents"] == 41 and fills[0]["contracts"] == 5
+    assert fills[0]["book_side"] == "bid"
+    print("PASS order manager notifies its observer on place, cancel and fill")
+
+
+def test_broken_observer_cannot_stop_trading():
+    from order_manager import OrderManager
+    from quoting import QuotePair
+    manager = OrderManager(None, "T", 30, 20, dry_run=True,
+                           observer=RecordingObserver(explode=True))
+    manager.sync_quotes(QuotePair(41, 5, 46, 5))
+    assert manager.resting["bid"] and manager.resting["ask"]
+    manager.apply_fill({"book_side": "bid", "count_fp": "5.00",
+                        "price": "0.41"})
+    assert manager.position == 5
+    manager.cancel_all()
+    assert manager.resting["bid"] is None
+    print("PASS a broken observer cannot stop trading")
+
+
+def test_recorder_queues_orders_and_fills():
+    instance = make_recorder()
+    instance.on_order_placed(ticker="T", order_id="OID1", book_side="bid",
+                             price_cents=41, contracts=5, status="resting")
+    instance.on_order_placed(ticker="T", order_id=None, book_side="ask",
+                             price_cents=46, contracts=5, status="rejected",
+                             reject_reason="post only cross")
+    instance.on_order_cancelled(ticker="T", order_id="OID1")
+    instance.on_order_cancelled(ticker="T", order_id=None)
+    instance.on_fill(ticker="T", fill={"trade_id": "TRADE_1",
+                                       "order_id": "OID1"},
+                     price_cents=41, contracts=5, book_side="bid")
+    tables = [table for table, _ticker, _values in instance.pending]
+    assert tables == ["orders", "orders", "order_cancelled", "fills"], tables
+    print("PASS recorder queues orders, cancellations and fills")
+
+
+def test_recorder_writes_orders_before_fills():
+    import recorder
+    connection = FakeRecorderConnection()
+    instance = make_recorder(connection)
+    instance.on_fill(ticker="T", fill={"trade_id": "F1", "order_id": "OID1"},
+                     price_cents=41, contracts=5, book_side="bid")
+    instance.on_order_placed(ticker="T", order_id="OID1", book_side="bid",
+                             price_cents=41, contracts=5, status="resting")
+    instance.on_order_cancelled(ticker="T", order_id="OID1")
+    instance.flush_once()
+    written = [table for table in connection.rows]
+    assert written.index("orders") < written.index("fills"), (
+        "orders must be written before fills so the order id resolves")
+    assert recorder.WRITE_SEQUENCE.index("orders") < \
+        recorder.WRITE_SEQUENCE.index("fills")
+    print("PASS recorder writes orders before fills regardless of queue order")
+
+
+def test_session_report_queries_are_parameterised():
+    import session_report
+    for statement in (session_report.SESSION_SUMMARY,
+                      session_report.ADVERSE_SELECTION,
+                      session_report.FAIR_VALUE_LEAD_LAG,
+                      session_report.FILL_QUALITY_BY_SPREAD):
+        assert "SELECT" in statement.upper()
+        assert "';" not in statement
+    assert session_report.ADVERSE_SELECTION.count("%s") == 3
+    assert session_report.FAIR_VALUE_LEAD_LAG.count("%s") == 3
+    print("PASS session report queries are parameterised")
 
 
 def main():

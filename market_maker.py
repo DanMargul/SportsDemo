@@ -59,6 +59,7 @@ async def run(args):
                           close_timestamp)
 
     manager = OrderManager(client, args.ticker, args.max_inventory, args.size,
+                           observer=recorder,
                            dry_run=not args.live)
     if args.live:
         manager.position = client.get_position(args.ticker)

@@ -28,6 +28,29 @@ TABLE_COLUMNS = {"book_snapshots": BOOK_SNAPSHOT_COLUMNS,
                  "quotes": QUOTE_COLUMNS,
                  "fair_values": FAIR_VALUE_COLUMNS}
 
+ORDER_INSERT = """
+INSERT INTO orders (kalshi_order_id, session_id, market_id, book_side,
+                    price_cents, contracts, placed_at, status, reject_reason)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+ON CONFLICT (kalshi_order_id) DO NOTHING
+"""
+
+FILL_INSERT = """
+INSERT INTO fills (kalshi_fill_id, order_id, market_id, ts, book_side,
+                   price_cents, contracts, fee_cents)
+VALUES (%s, (SELECT id FROM orders WHERE kalshi_order_id = %s), %s, %s, %s,
+        %s, %s, %s)
+ON CONFLICT (kalshi_fill_id) DO NOTHING
+"""
+
+ORDER_CANCEL_UPDATE = """
+UPDATE orders SET cancelled_at = %s, status = 'cancelled'
+WHERE kalshi_order_id = %s AND cancelled_at IS NULL
+"""
+
+WRITE_SEQUENCE = ("orders", "fills", "order_cancelled", "book_snapshots",
+                  "quotes", "fair_values")
+
 MARKET_UPSERT = """
 INSERT INTO markets (ticker, family, league, strike, side_code, game_start,
                      close_time)
@@ -125,6 +148,35 @@ class Recorder:
         except Exception as error:
             log.debug("recorder record_quote failed: %s", error)
 
+    def on_order_placed(self, ticker, order_id, book_side, price_cents,
+                        contracts, status, reject_reason=None):
+        try:
+            self.submit("orders", ticker, (
+                order_id, book_side, price_cents, contracts,
+                as_timestamp(time.time()), status, reject_reason))
+        except Exception as error:
+            log.debug("recorder on_order_placed failed: %s", error)
+
+    def on_order_cancelled(self, ticker, order_id):
+        try:
+            if not order_id:
+                return
+            self.submit("order_cancelled", ticker,
+                        (as_timestamp(time.time()), order_id))
+        except Exception as error:
+            log.debug("recorder on_order_cancelled failed: %s", error)
+
+    def on_fill(self, ticker, fill, price_cents, contracts, book_side):
+        try:
+            self.submit("fills", ticker, (
+                fill.get("trade_id") or fill.get("fill_id")
+                or fill.get("id"),
+                fill.get("order_id"), as_timestamp(time.time()), book_side,
+                price_cents, contracts,
+                int(round(float(fill.get("fee_cents") or 0)))))
+        except Exception as error:
+            log.debug("recorder on_fill failed: %s", error)
+
     def record_fair_value(self, ticker, moment, watcher):
         try:
             if watcher is None or watcher.fair_probability is None:
@@ -170,21 +222,46 @@ class Recorder:
             batch.append(self.pending.popleft())
         return batch
 
+    def build_row(self, table, market_id, values):
+        if table == "quotes":
+            return (self.session_id, market_id) + values
+        if table == "orders":
+            order_id, book_side, price, contracts, placed, status, reason = \
+                values
+            return (order_id, self.session_id, market_id, book_side, price,
+                    contracts, placed, status, reason)
+        if table == "fills":
+            fill_id, order_id, ts, side, price, contracts, fee = values
+            return (fill_id, order_id, market_id, ts, side, price, contracts,
+                    fee)
+        return (market_id,) + values
+
     def write_batch(self, batch):
         grouped = collections.defaultdict(list)
         for table, ticker, values in batch:
+            if table == "order_cancelled":
+                grouped[table].append(values)
+                continue
             market_id = self.ensure_market(ticker)
-            if table == "quotes":
-                grouped[table].append((self.session_id, market_id) + values)
-            else:
-                grouped[table].append((market_id,) + values)
+            grouped[table].append(self.build_row(table, market_id, values))
         with self.connection.cursor() as cursor:
-            for table, rows in grouped.items():
-                columns = TABLE_COLUMNS[table]
-                placeholders = ", ".join(["%s"] * len(columns))
-                cursor.executemany(
-                    f"INSERT INTO {table} ({', '.join(columns)}) "
-                    f"VALUES ({placeholders}) ON CONFLICT DO NOTHING", rows)
+            for table in WRITE_SEQUENCE:
+                rows = grouped.get(table)
+                if not rows:
+                    continue
+                if table == "orders":
+                    cursor.executemany(ORDER_INSERT, rows)
+                elif table == "fills":
+                    cursor.executemany(FILL_INSERT, rows)
+                elif table == "order_cancelled":
+                    cursor.executemany(ORDER_CANCEL_UPDATE, rows)
+                else:
+                    columns = TABLE_COLUMNS[table]
+                    placeholders = ", ".join(["%s"] * len(columns))
+                    cursor.executemany(
+                        f"INSERT INTO {table} ({', '.join(columns)}) "
+                        f"VALUES ({placeholders}) ON CONFLICT DO NOTHING",
+                        rows)
         self.connection.commit()
         self.written += len(batch)
 
