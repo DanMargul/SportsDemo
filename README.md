@@ -9,7 +9,7 @@ https://github.com/user-attachments/assets/502fc4e5-4150-45b1-831e-a4c9c4093df6
 
 This is a minimal example of a live market-making session:
 
-    python market_maker.py --live <KALSHI_TICKER>
+    python market_maker.py <KALSHI_TICKER> --live 
 
 Note: Run without `--live` to prevent placing orders. Whether or not real orders will be placed, the user must have a Kalshi account with an API key and a private key file. They must be declared as environment variables:
 
