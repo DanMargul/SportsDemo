@@ -20,7 +20,7 @@ Note: Run without `--live` to prevent placing orders. Whether or not real orders
     export KALSHI_API_KEY_ID=<KALSHI_API_KEY_ID>
     export KALSHI_PRIVATE_KEY_PATH=<KALSHI_PRIVATE_KEY_PATH>
 
-As demonstrated in the screen recording above, a live market making session can be initiated with many more arguments:
+As demonstrated in the screen recording above, a live market making session can be initiated with many more arguments. The main reason for this is to use sharp book odds from SportsGameOdds to derive fair values:
 
     sports-marketmaker --live <KALSHI_TICKER> --sgo-event <EVENT_ID> --sgo-odd <ODD_ID> --sgo-line <LINE> --duration-minutes <SESSION_LENGTH_MINUTES> --data-interval-seconds <MARKET_DATA_REFRESH_INTERVAL_SECONDS> --quote-size <MAXIMUM_SIZE_ORDER>
 
