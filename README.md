@@ -51,17 +51,20 @@ Fair prices can be computed during market-making sessions with a consensus of sh
 Examples with three different odds formats:
 
     sports-devig 120 -140
-        >> Fair Probabilities: [0.4344, 0.5656]
-        >> Overround: 3.79%
+<img width="460" height="52" alt="image" src="https://github.com/user-attachments/assets/827e479b-d68c-4b7d-8337-faac650381fa" />
 
+   
+  
     sports-devig 0.6 0.45
-        >> Fair Probabilities: [0.5768, 0.4232]
-        >> Overround: 5.00%
+<img width="460" height="52" alt="image" src="https://github.com/user-attachments/assets/845136f9-99eb-4913-b48c-0ae9999b6db5" />
 
+  
+  
     sports-devig 1.97 1.95
-        >> Fair Probabilities: [0.4974, 0.5026]
-        >> Overround: 2.04%
+<img width="460" height="52" alt="image" src="https://github.com/user-attachments/assets/214b614d-2940-4168-b225-0a7780593841" />
 
+
+  
 ## Snapshot of a Live Order Book
 
 For some quick information about a live Kalshi market order book:
@@ -78,7 +81,6 @@ Example:
 
 ## Less-Documented Capabilities
 * Order placement (and cancellation) with Kalshi websocket
-* Microstructure reporting including microprice, depth, signed flow
 * Quote generation based on model of Avellaneda & Stoikov
 * Automated discovery and matching of Kalshi 'tickers' and SportsGameOdds 'odd IDs'
 
