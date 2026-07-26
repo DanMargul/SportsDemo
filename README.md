@@ -42,14 +42,27 @@ With the Kalshi ticker, the SportsGameOdds Event ID and Odd ID can be found with
 
     sports-discover propose <KALSHI_TICKER>
 
-## Capabilities
+## Devig Bookmaker Odds
+
+Fair prices can be computed during market-making sessions with a consensus of sharp book odds available through SportsGameOdds. These odds must have vig removed, and this functionality is also available as the command-line tool `sports-devig`.
+
+    sports-devig 120 -140
+        >> Fair Probabilities: [0.4344, 0.5656]
+        >> Overround: 3.79%
+
+    sports-devig 0.6 0.45
+        >> Fair Probabilities: [0.5768, 0.4232]
+        >> Overround: 5.00%
+
+    sports-devig 1.97 1.95
+        >> Fair Probabilities: [0.4974, 0.5026]
+        >> Overround: 2.04%
+
+## Less-Documented Capabilities
 * Representation and analysis of (Kalshi) live order book
 * Order placement (and cancellation) with Kalshi websocket
 * Microstructure reporting including microprice, depth, signed flow
-* Devig bookmaker odds
 * Quote generation based on model of Avellaneda & Stoikov
-* Sharp-book derived fair odds with SportsGameOdds poller
-* Visualization of live session via dashboard
 * Automated discovery and matching of Kalshi 'tickers' and SportsGameOdds 'odd IDs'
 
 ## Extensions Currently in Progress
