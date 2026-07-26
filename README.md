@@ -22,7 +22,7 @@ Note: Run without `--live` to prevent placing orders. Whether or not real orders
 
 As demonstrated in the screen recording above, a live market making session can be initiated with many more arguments. The main reason for this is to use sharp book odds from SportsGameOdds to derive fair values:
 
-    sports-marketmaker --live <KALSHI_TICKER> --sgo-event <EVENT_ID> --sgo-odd <ODD_ID> --sgo-line <LINE> --duration-minutes <SESSION_LENGTH_MINUTES> --data-interval-seconds <MARKET_DATA_REFRESH_INTERVAL_SECONDS> --quote-size <MAXIMUM_SIZE_ORDER>
+    sports-marketmaker --live <KALSHI_TICKER> --sgo-event <EVENT_ID> --sgo-odd <ODD_ID>--sgo-line <LINE> 
 
 If any of {`--sgo-event`, `--sgo-odd`, `--sgo-line`} are used, a SportsGameOdds API key is required:
 
@@ -53,12 +53,8 @@ Examples with three different odds formats:
     sports-devig 120 -140
 <img width="460" height="52" alt="image" src="https://github.com/user-attachments/assets/827e479b-d68c-4b7d-8337-faac650381fa" />
 
-   
-  
     sports-devig 0.6 0.45
 <img width="460" height="52" alt="image" src="https://github.com/user-attachments/assets/845136f9-99eb-4913-b48c-0ae9999b6db5" />
-
-  
   
     sports-devig 1.97 1.95
 <img width="460" height="52" alt="image" src="https://github.com/user-attachments/assets/214b614d-2940-4168-b225-0a7780593841" />
