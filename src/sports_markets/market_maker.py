@@ -40,7 +40,7 @@ async def run(args):
     log.info("[%s] status %s | closes %s", args.ticker,
              market.get("status"), market.get("close_time"))
 
-    manager = OrderManager(client, args.ticker, args.max_inventory, args.size,
+    manager = OrderManager(client, args.ticker, args.max_inventory, args.quote_size,
                            dry_run=not args.live)
     if args.live:
         manager.position = client.get_position(args.ticker)
@@ -88,7 +88,7 @@ async def run(args):
     last_gap_warning = 0.0
     try:
         while time.time() < hard_stop:
-            await asyncio.sleep(args.data_interval)
+            await asyncio.sleep(args.data_interval_seconds)
             now = time.time()
             if now > close_timestamp - CLOSE_BUFFER_SECONDS:
                 log.info("[%s] close buffer reached; pulling quotes", args.ticker)
