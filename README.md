@@ -44,24 +44,43 @@ With the Kalshi ticker, the SportsGameOdds Event ID and Odd ID can be found with
 
 ## Devig Bookmaker Odds
 
-Fair prices can be computed during market-making sessions with a consensus of sharp book odds available through SportsGameOdds. These odds must have vig removed, and this functionality is also available as the command-line tool `sports-devig`.
+Fair prices can be computed during market-making sessions with a consensus of sharp book odds available through SportsGameOdds. These odds must have vig removed, and this functionality is also available as a command-line tool:
+
+    sports-devig <number-1> <number-2> ... <number-N>
+
+Examples with three different odds formats:
 
     sports-devig 120 -140
-        >> Fair Probabilities: [0.4344, 0.5656]
-        >> Overround: 3.79%
+<img width="460" height="52" alt="image" src="https://github.com/user-attachments/assets/827e479b-d68c-4b7d-8337-faac650381fa" />
 
+   
+  
     sports-devig 0.6 0.45
-        >> Fair Probabilities: [0.5768, 0.4232]
-        >> Overround: 5.00%
+<img width="460" height="52" alt="image" src="https://github.com/user-attachments/assets/845136f9-99eb-4913-b48c-0ae9999b6db5" />
 
+  
+  
     sports-devig 1.97 1.95
-        >> Fair Probabilities: [0.4974, 0.5026]
-        >> Overround: 2.04%
+<img width="460" height="52" alt="image" src="https://github.com/user-attachments/assets/214b614d-2940-4168-b225-0a7780593841" />
+
+
+  
+## Snapshot of a Live Order Book
+
+For some quick information about a live Kalshi market order book:
+
+    sports-analyze <KALSHI_TICKER>
+
+Example: 
+
+    sports-analyze KXMLBGAME-26JUL261335TORBOS-BOS
+    
+<img width="893" height="554" alt="image" src="https://github.com/user-attachments/assets/47847678-47a3-4f44-b48e-eee7f0464f3a" />
+
+    
 
 ## Less-Documented Capabilities
-* Representation and analysis of (Kalshi) live order book
 * Order placement (and cancellation) with Kalshi websocket
-* Microstructure reporting including microprice, depth, signed flow
 * Quote generation based on model of Avellaneda & Stoikov
 * Automated discovery and matching of Kalshi 'tickers' and SportsGameOdds 'odd IDs'
 
