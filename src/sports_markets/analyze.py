@@ -15,12 +15,9 @@ def trade_price_cents(trade):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="One-shot microstructure report for a Kalshi market.")
+        description="Single-instant microstructure report for a Kalshi market.")
     parser.add_argument("ticker")
-    parser.add_argument("--env", choices=["prod", "demo"], default=None)
     args = parser.parse_args()
-    if args.env:
-        kalshi.environment = args.env
 
     client = kalshi.KalshiClient()
     market = client.get_market(args.ticker)
@@ -56,13 +53,13 @@ def main():
                                / (bid_quantity + ask_quantity))
     sigma_daily = volatility.sigma_per_sqrt_second() * math.sqrt(86400)
 
-    print(f"\nmid          {book.mid_cents}c    "
-          f"microprice {book.microprice_cents and round(book.microprice_cents, 2)}c")
+    print(f"\nmidprice:     {book.mid_cents}c    ")
+    if book.microprice_cents:
+          print(f"microprice:   {round(book.microprice_cents, 2)}c")
     print(f"spread       {book.spread_cents}c")
-    print(f"touch imbal  {touch_imbalance and round(touch_imbalance, 3)}")
-    print(f"sigma        {sigma_daily:.4f}/day (from last {len(trades)} trades)")
-    print(f"tape         {total_volume:.0f} contracts, signed flow "
-          f"{signed_flow:+.0f} (+ = net YES buying)")
+    if touch_imbalance:
+        print(f"touch imbalance:    {round(touch_imbalance, 3)}")
+    print(f"volatility:     {sigma_daily:.4f}/day (from last {len(trades)} trades)")
 
 
 if __name__ == "__main__":
