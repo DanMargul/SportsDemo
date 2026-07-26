@@ -28,13 +28,15 @@ If any of {`--sgo-event`, `--sgo-odd`, `--sgo-line`} are used, a SportsGameOdds 
 
     export SGO_API_KEY=<SGO_API_KEY>
 
-## Dashboard 
+## Other Capabilities
+
+### Dashboard 
 
 A session can be visualized if `sports-marketmaker` is run with the argument `--state-file <STATE_FILE_PATH>`. In a separate terminal:
 
     sports-dashboard --state-file <STATE_FILE_PATH>
 
-## Kalshi Ticker & SportsGameOdds Event ID and Odd ID
+### Kalshi Ticker & SportsGameOdds Event ID and Odd ID
 
 Every market on Kalshi has a unique identifier that is a mandatory argument for `sports-marketmaker`. When viewing a Kalshi market in a web browser, the URL will end with `op_market_ticker=<KALSHI_TICKER>`.
 
@@ -42,7 +44,7 @@ With the Kalshi ticker, the SportsGameOdds Event ID and Odd ID can be found with
 
     sports-discover propose <KALSHI_TICKER>
 
-## Devig Bookmaker Odds
+### Devig Bookmaker Odds
 
 Fair prices can be computed during market-making sessions with a consensus of sharp book odds available through SportsGameOdds. These odds must have vig removed, and this functionality is also available as a command-line tool:
 
@@ -61,7 +63,7 @@ Examples with three different odds formats:
 
 
   
-## Snapshot of a Live Order Book
+### Snapshot of a Live Order Book
 
 For some quick information about a live Kalshi market order book:
 
