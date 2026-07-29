@@ -80,6 +80,7 @@ Example:
 ## Less-Documented Capabilities
 * Order placement (and cancellation) with Kalshi websocket
 * Quote generation based on model of Avellaneda & Stoikov
+  * Estimation of time to market close given start time, league, and phase of game. 
 * Automated discovery and matching of Kalshi 'tickers' and SportsGameOdds 'odd IDs'
 
 ## Extensions Currently in Progress
