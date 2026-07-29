@@ -85,7 +85,7 @@ Example:
 
 ## Extensions Currently in Progress
 * ETL with Postgresql ([Pull Request](https://github.com/DanMargul/SportsDemo/pull/3))
-* Infrastructure for trading on multiple markets simultaneously (dashboard update as well?)
+* Infrastructure for trading on multiple markets simultaneously (dashboard update as well?) ([Pull Request](https://github.com/DanMargul/SportsDemo/pull/6))
 * ~~Improve estimate of time-to-close; Kalshi markets for events can close days after end of game.~~ ([Merged](https://github.com/DanMargul/SportsDemo/pull/4))
 
 ## Future
