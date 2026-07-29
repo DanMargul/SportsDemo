@@ -3,7 +3,7 @@ import time
 
 from nicegui import ui
 
-from dashboard_state import DEFAULT_STATE_PATH, read_state
+from sports_markets.dashboard_state import DEFAULT_STATE_PATH, read_state
 
 BACKGROUND = "#0D1520"
 PANEL = "#131F2E"
@@ -53,6 +53,7 @@ class DashboardView:
                 self.spread_stat = self._stat_card("Spread")
                 self.position_stat = self._stat_card("Position")
                 self.pnl_stat = self._stat_card("Session P&L")
+                self.fair_stat = self._stat_card("Ext Fair")
                 self.fills_stat = self._stat_card("Fills")
 
             with ui.card().style(
@@ -123,9 +124,7 @@ class DashboardView:
 
         self.ticker_label.text = state.get("ticker", "--")
         self.env_chip.text = state.get("env", "")
-        self.mode_chip.text = "LIVE" \
-            if state.get("live") \
-            else "DRY RUN"
+        self.mode_chip.text = "LIVE" if state.get("live") else "DRY RUN"
         self.mode_chip.style(
             f"font-size:11px;padding:2px 9px;border:1px solid "
             f"{AMBER if state.get('live') else LINE};border-radius:3px;"
@@ -149,6 +148,18 @@ class DashboardView:
             f"font-size:19px;font-weight:600;"
             f"color:{BID_GREEN if pnl > 0 else ASK_RED if pnl < 0 else TEXT}")
         self.fills_stat.text = str(state.get("fill_count", 0))
+
+        fair = state.get("fair_cents")
+        if fair is None:
+            self.fair_stat.text = "--"
+            self.fair_stat.style(
+                f"font-size:19px;font-weight:600;color:{DIM}")
+        else:
+            age = state.get("fair_age_seconds")
+            age_text = "" if age is None else f" · {round(age)}s"
+            self.fair_stat.text = f"{fair:.1f}c{age_text}"
+            self.fair_stat.style(
+                f"font-size:19px;font-weight:600;color:{AMBER}")
 
         self._render_ladder(state)
 
@@ -202,7 +213,7 @@ def main():
     args = parser.parse_args()
     DashboardView(args.state_file, args.refresh)
     ui.run(host="127.0.0.1", port=args.port, reload=False, show=False,
-           title="SportsCapital Demo", dark=True)
+           title="kalshi mm", dark=True)
 
 
 if __name__ in {"__main__", "__mp_main__"}:

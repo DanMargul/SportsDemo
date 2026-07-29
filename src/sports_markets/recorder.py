@@ -192,7 +192,7 @@ class Recorder:
             log.debug("recorder record_fair_value failed: %s", error)
 
     def open_connection(self):
-        import db
+        from sports_markets import db
         self.connection = db.connect(self.url)
         with self.connection.cursor() as cursor:
             if self.session_id is not None:

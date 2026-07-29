@@ -7,7 +7,7 @@ import time
 
 import requests
 
-import devig
+from sports_markets import devig
 
 log = logging.getLogger("sgo_fairvalue")
 
@@ -299,9 +299,13 @@ def main():
     watch_parser.add_argument("--invert", action="store_true",
                               help="use 1-p (the odd settles Kalshi NO)")
     args = parser.parse_args()
-    {"events": list_events, "odds": list_odds,
-     "watch": watch_odd}[args.command](args)
-
+    commands = {
+        "events": list_events,
+        "odds": list_odds,
+        "watch": watch_odd
+    }
+    declared_function = commands[args.command]
+    declared_function(args)
 
 if __name__ == "__main__":
     main()

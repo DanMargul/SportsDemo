@@ -112,7 +112,7 @@ def query(connection, statement, parameters=()):
 
 
 def run_report(args):
-    import db
+    from sports_markets import db
     with db.connect(args.url) as connection:
         columns, rows = query(connection, SESSION_SUMMARY, (args.sessions,))
         print_rows("Recent sessions", columns, rows)

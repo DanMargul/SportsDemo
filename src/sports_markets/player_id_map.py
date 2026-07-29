@@ -3,7 +3,7 @@ import logging
 import os
 from datetime import datetime, timezone
 
-from player_codes import decode_player_code, name_similarity
+from sports_markets.player_codes import decode_player_code, name_similarity
 
 log = logging.getLogger("player_id_map")
 
@@ -83,7 +83,7 @@ class PostgresPlayerIdMap:
 
 
 def open_player_id_map(url=None):
-    import db
+    from sports_markets import db
     return PostgresPlayerIdMap(db.connect(url))
 
 

@@ -2,10 +2,16 @@ import argparse
 import os
 import pathlib
 import re
+import shutil
+import subprocess
 from dataclasses import dataclass
+from importlib import resources
 
-MIGRATIONS_DIRECTORY = pathlib.Path(__file__).resolve().parent / "migrations"
 MIGRATION_FILENAME = re.compile(r"^(\d{4})_([a-z0-9_]+)\.sql$")
+
+
+def package_migrations():
+    return resources.files("kalshi_mm").joinpath("migrations")
 
 SCHEMA_MIGRATIONS_TABLE = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -44,13 +50,16 @@ def connect(url=None):
     return psycopg.connect(url or database_url())
 
 
-def discover_migrations(directory=MIGRATIONS_DIRECTORY):
-    directory = pathlib.Path(directory)
+def discover_migrations(directory=None):
+    if directory is None:
+        directory = package_migrations()
+    elif isinstance(directory, (str, pathlib.Path)):
+        directory = pathlib.Path(directory)
     if not directory.is_dir():
         raise FileNotFoundError(f"no migrations directory at {directory}")
     migrations, seen_versions = [], {}
-    for path in sorted(directory.iterdir()):
-        if path.suffix != ".sql":
+    for path in sorted(directory.iterdir(), key=lambda entry: entry.name):
+        if not path.name.endswith(".sql"):
             continue
         match = MIGRATION_FILENAME.match(path.name)
         if not match:
@@ -78,13 +87,13 @@ def applied_versions(connection):
         return {row[0] for row in cursor.fetchall()}
 
 
-def pending_migrations(connection, directory=MIGRATIONS_DIRECTORY):
+def pending_migrations(connection, directory=None):
     applied = applied_versions(connection)
     return [migration for migration in discover_migrations(directory)
             if migration.version not in applied]
 
 
-def migrate(connection, directory=MIGRATIONS_DIRECTORY):
+def migrate(connection, directory=None):
     ensure_migrations_table(connection)
     applied = []
     for migration in pending_migrations(connection, directory):
@@ -98,7 +107,7 @@ def migrate(connection, directory=MIGRATIONS_DIRECTORY):
     return applied
 
 
-def migration_status(connection, directory=MIGRATIONS_DIRECTORY):
+def migration_status(connection, directory=None):
     ensure_migrations_table(connection)
     applied = applied_versions(connection)
     return [(migration, migration.version in applied)
@@ -126,10 +135,25 @@ def run_status(args):
 
 
 def run_import_players(args):
-    from player_id_map import import_json_into_postgres
+    from kalshi_mm.player_id_map import import_json_into_postgres
     with connect(args.url) as connection:
         imported, total = import_json_into_postgres(connection, args.path)
     print(f"imported {imported} of {total} players from {args.path}")
+
+
+def run_shell(args):
+    if shutil.which("psql") is None:
+        raise SystemExit("psql is not installed; install the postgresql "
+                         "client package")
+    environment = dict(os.environ)
+    packaged_config = resources.files("kalshi_mm").joinpath(".psqlrc")
+    if packaged_config.is_file() and "PSQLRC" not in environment:
+        with resources.as_file(packaged_config) as config_path:
+            environment["PSQLRC"] = str(config_path)
+            raise SystemExit(subprocess.call(
+                ["psql", args.url or database_url()], env=environment))
+    raise SystemExit(subprocess.call(["psql", args.url or database_url()],
+                                     env=environment))
 
 
 def main():
@@ -148,6 +172,9 @@ def main():
         "import-players", help="load player_id_map.json into the players table")
     import_parser.add_argument("--path", default="player_id_map.json")
     import_parser.set_defaults(func=run_import_players)
+    shell_parser = commands.add_parser(
+        "shell", help="open a psql session against DATABASE_URL")
+    shell_parser.set_defaults(func=run_shell)
     args = parser.parse_args()
     args.func(args)
 

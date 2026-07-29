@@ -4,13 +4,17 @@ import json
 import logging
 import time
 
-import game_clock
-import kalshi
-import market_catalog
-import quoting
-import recorder as recorder_module
-from market_data_feed import MarketDataFeed
-from order_manager import OrderManager
+from sports_markets import kalshi
+from sports_markets import quoting
+from sports_markets.market_data_feed import MarketDataFeed
+from sports_markets.order_manager import OrderManager
+from sports_markets import game_clock
+from sports_markets import kalshi
+from sports_markets import market_catalog
+from sports_markets import quoting
+from sports_markets import recorder as recorder_module
+from sports_markets.market_data_feed import MarketDataFeed
+from sports_markets.order_manager import OrderManager
 
 log = logging.getLogger("market_maker")
 tick_log = logging.getLogger("market_maker.tick")
@@ -44,7 +48,7 @@ class ManagedMarket:
             risk_aversion=float(merged.get("gamma", 0.3)),
             fill_intensity_decay=float(merged.get("k", 50.0)),
             quote_size=self.size, max_inventory=self.max_inventory)
-        self.volatility = quoting.EwmaVolatility()
+        self.volatility = quoting.VolatilityEWMA()
         self.manager = OrderManager(client, self.ticker, self.max_inventory,
                                     self.size, dry_run=dry_run,
                                     observer=observer)
@@ -131,14 +135,14 @@ class ManagedMarket:
 
 
 def single_market_spec(args):
-    spec = {"ticker": args.ticker, "size": args.size,
-            "max_inventory": args.max_inventory, "gamma": args.gamma,
-            "k": args.k}
+    spec = {"ticker": args.ticker, "size": args.quote_size,
+            "max_inventory": args.max_inventory, "gamma": args.risk_aversion_gamma,
+            "k": args.fill_intensity_decay_k}
     for key in ("sgo_event", "sgo_odd", "sgo_line", "sgo_invert"):
         value = getattr(args, key, None)
         if value:
             spec[key] = value
-    return {"defaults": {"sgo_poll": args.sgo_poll}, "markets": [spec]}
+    return {"defaults": {"sgo_refresh (s)": args.sgo_refresh_seconds}, "markets": [spec]}
 
 
 def load_markets(source, client, dry_run, observer=None):
@@ -147,10 +151,10 @@ def load_markets(source, client, dry_run, observer=None):
         fallback_poll = 10.0
     elif getattr(source, "config", None):
         config = json.load(open(source.config))
-        fallback_poll = source.sgo_poll
+        fallback_poll = source.sgo_refresh_seconds
     else:
         config = single_market_spec(source)
-        fallback_poll = source.sgo_poll
+        fallback_poll = source.sgo_refresh_seconds
     defaults = config.get("defaults", {})
     markets = [ManagedMarket(spec, defaults, client, dry_run,
                              observer=observer)
@@ -178,7 +182,7 @@ async def run(args):
     markets, sgo_poll, resolved_config = load_markets(
         args, client, not args.live, observer=recorder)
     recorder.config = {"source": args.config or args.ticker,
-                       "interval": args.interval, **resolved_config}
+                       "data interval (s)": args.data_interval_seconds, **resolved_config}
     try:
         recorder.open_connection()
     except Exception as error:
@@ -211,7 +215,7 @@ async def run(args):
         log.info("writing dashboard state to %s (run: python dashboard.py "
                  "--state-file %s)", args.state_file, args.state_file)
 
-    from sgo_fairvalue import SgoEventPoller
+    from sports_markets.sgo_fairvalue import SgoEventPoller
     pollers_by_event = {}
     for market in markets:
         if market.sgo_odd and market.sgo_event:
@@ -250,11 +254,11 @@ async def run(args):
               for poller in pollers_by_event.values()]
     recorder_task = asyncio.create_task(recorder.run())
 
-    hard_stop = (time.time() + args.minutes * 60
-                 if args.minutes else float("inf"))
+    hard_stop = (time.time() + args.duration_minutes * 60
+                 if args.duration_minutes else float("inf"))
     try:
         while time.time() < hard_stop:
-            await asyncio.sleep(args.interval)
+            await asyncio.sleep(args.data_interval_seconds)
             now = time.time()
             rows = []
             for market in markets:
@@ -381,16 +385,16 @@ def main():
     target.add_argument("--config", metavar="PATH",
                         help="markets JSON (see markets.example.json)")
     parser.add_argument("--live", action="store_true")
-    parser.add_argument("--minutes", type=float, default=None)
-    parser.add_argument("--interval", type=float, default=1.0)
-    parser.add_argument("--size", type=int, default=10)
+    parser.add_argument("--duration-minutes", type=float, default=None)
+    parser.add_argument("--data-interval-seconds", type=float, default=1.0)
+    parser.add_argument("--quote_size", type=int, default=10)
     parser.add_argument("--max-inventory", type=int, default=50)
-    parser.add_argument("--gamma", type=float, default=0.3)
-    parser.add_argument("--k", type=float, default=50.0)
+    parser.add_argument("--risk-aversion-gamma", type=float, default=0.3)
+    parser.add_argument("--fill-intensity-decay-k", type=float, default=50.0)
     parser.add_argument("--state-file", default=None, metavar="PATH")
     parser.add_argument("--sgo-event", default=None)
     parser.add_argument("--sgo-odd", default=None)
-    parser.add_argument("--sgo-poll", type=float, default=10.0)
+    parser.add_argument("--sgo-refresh-seconds", type=float, default=10.0)
     parser.add_argument("--sgo-line", default=None, metavar="STRIKE")
     parser.add_argument("--sgo-invert", action="store_true")
     parser.add_argument("--no-game-clock", action="store_true",

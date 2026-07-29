@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 
-from market_catalog import canonical_team, parse_iso_date
+from sports_markets.market_catalog import canonical_team, parse_iso_date
 
 EVENT_LOCAL_TIMEZONE = "America/New_York"
 

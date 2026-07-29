@@ -58,7 +58,7 @@ ORDER BY m.ticker
 
 
 def open_store(url=None):
-    import db
+    from sports_markets import db
     return DiscoveryStore(db.connect(url))
 
 
