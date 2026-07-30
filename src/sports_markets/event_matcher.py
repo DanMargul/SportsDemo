@@ -5,14 +5,14 @@ from sports_markets.market_catalog import canonical_team, parse_iso_date
 EVENT_LOCAL_TIMEZONE = "America/New_York"
 
 
-def to_event_local(moment):
-    if moment is None:
+def to_event_local(moment_timestamp):
+    if moment_timestamp is None:
         return None
     try:
         from zoneinfo import ZoneInfo
-        return moment.astimezone(ZoneInfo(EVENT_LOCAL_TIMEZONE))
+        return moment_timestamp.astimezone(ZoneInfo(EVENT_LOCAL_TIMEZONE))
     except Exception:
-        return moment
+        return moment_timestamp
 
 
 def start_time_gap_minutes(parsed_ticker, local_dt):

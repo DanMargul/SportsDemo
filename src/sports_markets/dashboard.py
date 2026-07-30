@@ -26,7 +26,7 @@ def cents(value, decimals=1):
 class DashboardView:
     def __init__(self, state_path, refresh_seconds):
         self.state_path = state_path
-        self.mid_history = []
+        self.mid_cents_history = []
         self._build()
         ui.timer(refresh_seconds, self.refresh)
 
@@ -49,7 +49,7 @@ class DashboardView:
                     f"font-size:12px;color:{DIM}")
 
             with ui.row().classes("w-full gap-2"):
-                self.mid_stat = self._stat_card("Mid")
+                self.mid_cents_stat = self._stat_card("Mid")
                 self.spread_stat = self._stat_card("Spread")
                 self.position_stat = self._stat_card("Position")
                 self.pnl_stat = self._stat_card("Session P&L")
@@ -96,22 +96,23 @@ class DashboardView:
                 f"font-size:19px;font-weight:600;color:{TEXT}")
         return value
 
-    def _ladder_row(self, price, quantity, max_quantity, side_color, mine):
+    def _ladder_row(self, price_cents, contracts,
+                    maximum_contracts, side_color, is_own_order):
         with ui.row().classes("items-center gap-2 w-full").style(
                 "padding:1px 4px;position:relative"):
-            if quantity is not None and max_quantity > 0:
-                bar_width = min(100, 100 * quantity / max_quantity)
+            if contracts is not None and maximum_contracts > 0:
+                bar_width = min(100, 100 * contracts / maximum_contracts)
                 ui.element("div").style(
                     f"position:absolute;right:0;top:2px;bottom:2px;"
                     f"width:{bar_width:.1f}%;background-color:{side_color};"
                     f"opacity:0.13;pointer-events:none")
-            ui.label(f"{price}c").style(
+            ui.label(f"{price_cents}c").style(
                 f"width:44px;color:{side_color};z-index:1")
-            if mine:
-                ui.label(f"YOU {mine[1]}").style(
+            if is_own_order:
+                ui.label(f"YOU {is_own_order[1]}").style(
                     f"font-size:9px;color:{BACKGROUND};background-color:{AMBER};"
                     f"border-radius:2px;padding:0 4px;font-weight:700;z-index:1")
-            ui.label("" if quantity is None else f"{round(quantity)}").classes(
+            ui.label("" if contracts is None else f"{round(contracts)}").classes(
                 "ml-auto").style(f"color:{DIM};z-index:1")
 
     def refresh(self):
@@ -119,7 +120,7 @@ class DashboardView:
         if not state:
             return
         served_at = time.time()
-        is_stale = served_at - state.get("ts", 0) > STALE_AFTER_SECONDS
+        is_stale = served_at - state.get("published_timestamp", 0) > STALE_AFTER_SECONDS
         self.stale_chip.visible = is_stale
 
         self.ticker_label.text = state.get("ticker", "--")
@@ -136,17 +137,17 @@ class DashboardView:
             self.countdown_label.text = (
                 f"stops in {int(remaining // 60)}m {int(remaining % 60)}s")
 
-        self.mid_stat.text = cents(state.get("mid_cents")) + "c"
+        self.mid_cents_stat.text = cents(state.get("mid_cents")) + "c"
         spread = state.get("spread_cents")
         self.spread_stat.text = ("--" if spread is None else f"{spread}") + "c"
         position = state.get("position", 0)
         self.position_stat.text = f"{position:+.0f}"
         self.position_stat.style(f"font-size:19px;font-weight:600;color:{AMBER}")
-        pnl = state.get("pnl_dollars", 0.0)
-        self.pnl_stat.text = f"${pnl:+.2f}"
+        pnl_dollars = state.get("pnl_dollars", 0.0)
+        self.pnl_stat.text = f"${pnl_dollars:+.2f}"
         self.pnl_stat.style(
             f"font-size:19px;font-weight:600;"
-            f"color:{BID_GREEN if pnl > 0 else ASK_RED if pnl < 0 else TEXT}")
+            f"color:{BID_GREEN if pnl_dollars > 0 else ASK_RED if pnl_dollars < 0 else TEXT}")
         self.fills_stat.text = str(state.get("fill_count", 0))
 
         fair = state.get("fair_cents")
@@ -164,11 +165,11 @@ class DashboardView:
         self._render_ladder(state)
 
         if state.get("mid_cents") is not None:
-            self.mid_history.append(state["mid_cents"])
-            self.mid_history = self.mid_history[-600:]
-            self.mid_chart.options["series"][0]["data"] = self.mid_history
+            self.mid_cents_history.append(state["mid_cents"])
+            self.mid_cents_history = self.mid_cents_history[-600:]
+            self.mid_chart.options["series"][0]["data"] = self.mid_cents_history
             self.mid_chart.options["xAxis"]["data"] = list(
-                range(len(self.mid_history)))
+                range(len(self.mid_cents_history)))
             self.mid_chart.update()
 
         log_lines = state.get("log", [])
@@ -184,22 +185,26 @@ class DashboardView:
             with self.ladder_container:
                 ui.label("waiting for book").style(f"color:{DIM}")
             return
-        quantities = [level[1] for level in book["bids"] + book["asks"]]
-        max_quantity = max(quantities) if quantities else 1
+        level_contracts = [level[1] for level in book["bids"] + book["asks"]]
+        maximum_contracts = max(level_contracts) if level_contracts else 1
         resting_bid = resting.get("bid")
         resting_ask = resting.get("ask")
         with self.ladder_container:
-            for price, quantity in reversed(book["asks"]):
-                mine = resting_ask if resting_ask and resting_ask[0] == price else None
-                self._ladder_row(price, quantity, max_quantity, ASK_RED, mine)
+            for price_cents, contracts in reversed(book["asks"]):
+                own_ask = (resting_ask if resting_ask
+                           and resting_ask[0] == price_cents else None)
+                self._ladder_row(price_cents, contracts, maximum_contracts,
+                                 ASK_RED, own_ask)
             ui.label(f"spread {state.get('spread_cents')}c · "
                      f"micro {cents(state.get('microprice_cents'))}c").style(
                 f"text-align:center;color:{DIM};font-size:10px;"
                 f"border-top:1px dashed {LINE};border-bottom:1px dashed {LINE};"
                 f"padding:3px 0;width:100%")
-            for price, quantity in book["bids"]:
-                mine = resting_bid if resting_bid and resting_bid[0] == price else None
-                self._ladder_row(price, quantity, max_quantity, BID_GREEN, mine)
+            for price_cents, contracts in book["bids"]:
+                own_bid = (resting_bid if resting_bid
+                           and resting_bid[0] == price_cents else None)
+                self._ladder_row(price_cents, contracts, maximum_contracts,
+                                 BID_GREEN, own_bid)
 
 
 def main():

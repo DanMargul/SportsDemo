@@ -131,7 +131,7 @@ async def run(args):
             if args.state_file:
                 write_state(args.state_file, {
                     "ticker": args.ticker, "env": kalshi.environment,
-                    "live": args.live, "ts": now,
+                    "live": args.live, "published_timestamp": now,
                     "stop_ts": close_timestamp - CLOSE_BUFFER_SECONDS,
                     "mid_cents": book.mid_cents,
                     "microprice_cents": book.microprice_cents,
