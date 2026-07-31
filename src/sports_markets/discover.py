@@ -88,8 +88,22 @@ CSV_COLUMNS = ["ticker", "needs_review", "confidence", "review_notes",
                "event_teams", "event_start", "event_confidence",
                "player_code"]
 
-DEFAULT_MARKET_SETTINGS = {"size": 5, "max_inventory": 20, "gamma": 0.1,
-                           "k": 50, "sgo_poll": 10.0}
+DEFAULT_MARKET_SETTINGS = {"quote_size": 5, "max_inventory": 20,
+                           "risk_aversion_gamma": 0.1,
+                           "fill_intensity_decay_k": 50,
+                           "sgo_refresh_seconds": 10.0}
+
+LEGACY_MARKET_SETTING_NAMES = {"size": "quote_size",
+                               "gamma": "risk_aversion_gamma",
+                               "k": "fill_intensity_decay_k",
+                               "sgo_poll": "sgo_refresh_seconds"}
+
+
+def canonical_market_settings(settings):
+    canonical = {}
+    for name, value in (settings or {}).items():
+        canonical[LEGACY_MARKET_SETTING_NAMES.get(name, name)] = value
+    return canonical
 
 
 def entry_to_row(entry):
