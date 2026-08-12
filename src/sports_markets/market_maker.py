@@ -5,11 +5,12 @@ import json
 import logging
 import time
 
-import kalshi
-import quoting
-from market_data_feed import MarketDataFeed
-from order_manager import OrderManager
-from sgo_fairvalue import SgoEventPoller
+from sports_markets import kalshi
+from sports_markets import quoting
+from sports_markets.discover import canonical_market_settings
+from sports_markets.market_data_feed import MarketDataFeed
+from sports_markets.order_manager import OrderManager
+from sports_markets.sgo_fairvalue import SgoEventPoller
 
 log = logging.getLogger("market_maker")
 
@@ -32,17 +33,18 @@ def recent_log_lines():
 
 class ManagedMarket:
     def __init__(self, spec, defaults, client, dry_run):
-        merged = {**defaults, **spec}
+        merged = canonical_market_settings({**defaults, **spec})
         self.ticker = spec["ticker"]
-        self.size = int(merged.get("size", 10))
+        self.quote_size = int(merged.get("quote_size", 10))
         self.max_inventory = int(merged.get("max_inventory", 50))
         self.config = quoting.QuoteConfig(
-            risk_aversion=float(merged.get("gamma", 0.3)),
-            fill_intensity_decay=float(merged.get("k", 50.0)),
-            quote_size=self.size, max_inventory=self.max_inventory)
-        self.volatility = quoting.EwmaVolatility()
+            risk_aversion=float(merged.get("risk_aversion_gamma", 0.3)),
+            fill_intensity_decay=float(
+                merged.get("fill_intensity_decay_k", 50.0)),
+            quote_size=self.quote_size, max_inventory=self.max_inventory)
+        self.volatility = quoting.VolatilityEWMA()
         self.manager = OrderManager(client, self.ticker, self.max_inventory,
-                                    self.size, dry_run=dry_run)
+                                    self.quote_size, dry_run=dry_run)
         self.sgo_event = merged.get("sgo_event")
         self.sgo_odd = merged.get("sgo_odd")
         self.sgo_line = merged.get("sgo_line")
@@ -80,7 +82,8 @@ def load_markets(config_path, client, dry_run):
     tickers = [market.ticker for market in markets]
     if len(set(tickers)) != len(tickers):
         raise SystemExit("duplicate tickers in config")
-    return markets, float(defaults.get("sgo_poll", 10.0))
+    return markets, float(canonical_market_settings(defaults).get(
+        "sgo_refresh_seconds", 10.0))
 
 
 async def run(args):
@@ -102,16 +105,16 @@ async def run(args):
             or market.close_timestamp)
         log.info("[%s] status %s | closes %s | size %d max_inv %d",
                  market.ticker, details.get("status"),
-                 details.get("close_time"), market.size, market.max_inventory)
+                 details.get("close_time"), market.quote_size,
+                 market.max_inventory)
         if args.live:
             market.manager.position = client.get_position(market.ticker)
             log.info("[%s] starting position: %+.0f", market.ticker,
                      market.manager.position)
 
     if args.state_file:
-        from dashboard_state import write_state
         logging.getLogger().addHandler(_LogCapture())
-        log.info("writing dashboard state to %s (run: python dashboard.py "
+        log.info("writing dashboard state to %s (run: sports-dashboard "
                  "--state-file %s)", args.state_file, args.state_file)
 
     pollers_by_event = {}
@@ -151,11 +154,11 @@ async def run(args):
     tasks += [asyncio.create_task(poller.run())
               for poller in pollers_by_event.values()]
 
-    hard_stop = (time.time() + args.minutes * 60
-                 if args.minutes else float("inf"))
+    hard_stop = (time.time() + args.duration_minutes * 60
+                 if args.duration_minutes else float("inf"))
     try:
         while time.time() < hard_stop:
-            await asyncio.sleep(args.interval)
+            await asyncio.sleep(args.data_interval_seconds)
             now = time.time()
             rows = []
             for market in markets:
@@ -239,7 +242,7 @@ def step_market(market, feed, now):
 
 
 def publish_state(state_file, markets, rows, hard_stop, now):
-    from dashboard_state import write_state
+    from sports_markets.dashboard_state import write_state
     stop_candidates = [hard_stop] + [
         market.close_timestamp - CLOSE_BUFFER_SECONDS
         for market in markets if not market.past_close]
@@ -248,7 +251,8 @@ def publish_state(state_file, markets, rows, hard_stop, now):
     write_state(state_file, {
         "env": kalshi.environment, "live": any(
             not market.manager.dry_run for market in markets),
-        "ts": now, "stop_ts": min(stop_candidates),
+        "published_timestamp": now,
+        "stop_ts": min(stop_candidates),
         "markets": rows, "total_pnl_dollars": total_pnl,
         "market_count": len(markets), "fill_count": total_fills,
         "log": recent_log_lines()})
@@ -264,8 +268,8 @@ def main():
                     "typed confirmation.")
     parser.add_argument("config", help="markets JSON (see markets.example.json)")
     parser.add_argument("--live", action="store_true")
-    parser.add_argument("--minutes", type=float, default=None)
-    parser.add_argument("--interval", type=float, default=1.0)
+    parser.add_argument("--duration-minutes", type=float, default=None)
+    parser.add_argument("--data-interval-seconds", type=float, default=1.0)
     parser.add_argument("--state-file", default=None, metavar="PATH")
     parser.add_argument("--env", choices=["prod", "demo"], default=None)
     args = parser.parse_args()

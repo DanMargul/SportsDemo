@@ -26,7 +26,7 @@ def cents(value, decimals=1):
 class MarketCard:
     def __init__(self, ticker):
         self.ticker = ticker
-        self.mid_history = []
+        self.mid_cents_history = []
         with ui.card().style(f"background-color:{PANEL};border:1px solid "
                              f"{LINE};padding:12px;width:340px"):
             with ui.row().classes("items-baseline gap-2 w-full"):
@@ -66,11 +66,11 @@ class MarketCard:
         self.pos_label.text = f"{position:+.0f}"
         self.pos_label.style(f"font-size:14px;font-weight:600;color:{AMBER};"
                              f"font-variant-numeric:tabular-nums")
-        pnl = row.get("pnl_dollars", 0.0)
-        self.pnl_label.text = f"${pnl:+.2f}"
+        pnl_dollars = row.get("pnl_dollars", 0.0)
+        self.pnl_label.text = f"${pnl_dollars:+.2f}"
         self.pnl_label.style(
             f"font-size:14px;font-weight:600;font-variant-numeric:tabular-nums;"
-            f"color:{BID_GREEN if pnl > 0 else ASK_RED if pnl < 0 else TEXT}")
+            f"color:{BID_GREEN if pnl_dollars > 0 else ASK_RED if pnl_dollars < 0 else TEXT}")
         fair = row.get("fair_cents")
         if fair is None:
             self.fair_label.text = "--"
@@ -83,11 +83,11 @@ class MarketCard:
                                   f"color:{AMBER}")
         self._render_ladder(row)
         if row.get("mid_cents") is not None:
-            self.mid_history.append(row["mid_cents"])
-            self.mid_history = self.mid_history[-300:]
-            self.chart.options["series"][0]["data"] = self.mid_history
+            self.mid_cents_history.append(row["mid_cents"])
+            self.mid_cents_history = self.mid_cents_history[-300:]
+            self.chart.options["series"][0]["data"] = self.mid_cents_history
             self.chart.options["xAxis"]["data"] = list(
-                range(len(self.mid_history)))
+                range(len(self.mid_cents_history)))
             self.chart.update()
 
     def _render_ladder(self, row):
@@ -99,37 +99,42 @@ class MarketCard:
                 ui.label("waiting for book").style(f"color:{DIM}")
             return
         quantities = [level[1] for level in book["bids"] + book["asks"]]
-        max_quantity = max(quantities) if quantities else 1
+        maximum_contracts = max(quantities) if quantities else 1
         resting_bid, resting_ask = resting.get("bid"), resting.get("ask")
         with self.ladder:
-            for price, quantity in reversed(book["asks"]):
-                mine = resting_ask if resting_ask and resting_ask[0] == price else None
-                self._row(price, quantity, max_quantity, ASK_RED, mine)
+            for price_cents, contracts in reversed(book["asks"]):
+                own_ask = (resting_ask if resting_ask
+                           and resting_ask[0] == price_cents else None)
+                self._ladder_row(price_cents, contracts, maximum_contracts,
+                                 ASK_RED, own_ask)
             ui.label(f"spread {row.get('spread_cents')}c").style(
                 f"text-align:center;color:{DIM};font-size:9px;"
                 f"border-top:1px dashed {LINE};border-bottom:1px dashed {LINE};"
                 f"padding:2px 0;width:100%")
-            for price, quantity in book["bids"]:
-                mine = resting_bid if resting_bid and resting_bid[0] == price else None
-                self._row(price, quantity, max_quantity, BID_GREEN, mine)
+            for price_cents, contracts in book["bids"]:
+                own_bid = (resting_bid if resting_bid
+                           and resting_bid[0] == price_cents else None)
+                self._ladder_row(price_cents, contracts, maximum_contracts,
+                                 BID_GREEN, own_bid)
 
-    def _row(self, price, quantity, max_quantity, color, mine):
+    def _ladder_row(self, price_cents, contracts,
+                    maximum_contracts, side_color, is_own_order):
         with ui.row().classes("items-center gap-2 w-full").style(
                 "padding:0 4px;position:relative"):
-            if quantity is not None and max_quantity > 0:
-                width = min(100, 100 * quantity / max_quantity)
+            if contracts is not None and maximum_contracts > 0:
+                width = min(100, 100 * contracts / maximum_contracts)
                 ui.element("div").style(
                     f"position:absolute;right:0;top:1px;bottom:1px;"
-                    f"width:{width:.1f}%;background-color:{color};"
+                    f"width:{width:.1f}%;background-side_color:{side_color};"
                     f"opacity:0.13;pointer-events:none")
-            ui.label(f"{price}c").style(
-                f"width:40px;color:{color};z-index:1;font-size:12px")
-            if mine:
-                ui.label(f"YOU {mine[1]}").style(
-                    f"font-size:9px;color:{BACKGROUND};background-color:{AMBER};"
+            ui.label(f"{price_cents}c").style(
+                f"width:40px;side_color:{side_color};z-index:1;font-size:12px")
+            if is_own_order:
+                ui.label(f"YOU {is_own_order[1]}").style(
+                    f"font-size:9px;side_color:{BACKGROUND};background-side_color:{AMBER};"
                     f"border-radius:2px;padding:0 4px;font-weight:700;z-index:1")
-            ui.label("" if quantity is None else f"{round(quantity)}").classes(
-                "ml-auto").style(f"color:{DIM};z-index:1;font-size:12px")
+            ui.label("" if contracts is None else f"{round(contracts)}").classes(
+                "ml-auto").style(f"side_color:{DIM};z-index:1;font-size:12px")
 
 
 class DashboardView:
@@ -183,7 +188,7 @@ class DashboardView:
         if not state:
             return
         served_at = time.time()
-        self.stale_chip.visible = served_at - state.get("ts", 0) > STALE_AFTER_SECONDS
+        self.stale_chip.visible = served_at - state.get("published_timestamp", 0) > STALE_AFTER_SECONDS
         live = state.get("live")
         self.mode_chip.text = "LIVE" if live else "DRY RUN"
         self.mode_chip.style(

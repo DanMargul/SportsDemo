@@ -74,9 +74,10 @@ def scan(args):
         write_entries(entries, args.out)
     else:
         print(json.dumps(
-            {"defaults": dict(DEFAULT_CONFIG_DEFAULTS),
-             "markets": [{k: v for k, v in e.items() if k != "_evidence"}
-                         for e in entries]}, indent=2))
+            {"defaults": dict(DEFAULT_MARKET_SETTINGS),
+             "markets": [{field: value for field, value in entry.items()
+                          if field != "_evidence"}
+                         for entry in entries]}, indent=2))
     _persist_id_map()
 
 
@@ -87,8 +88,22 @@ CSV_COLUMNS = ["ticker", "needs_review", "confidence", "review_notes",
                "event_teams", "event_start", "event_confidence",
                "player_code"]
 
-DEFAULT_CONFIG_DEFAULTS = {"size": 5, "max_inventory": 20, "gamma": 0.1,
-                           "k": 50, "sgo_poll": 10.0}
+DEFAULT_MARKET_SETTINGS = {"quote_size": 5, "max_inventory": 20,
+                           "risk_aversion_gamma": 0.1,
+                           "fill_intensity_decay_k": 50,
+                           "sgo_refresh_seconds": 10.0}
+
+LEGACY_MARKET_SETTING_NAMES = {"size": "quote_size",
+                               "gamma": "risk_aversion_gamma",
+                               "k": "fill_intensity_decay_k",
+                               "sgo_poll": "sgo_refresh_seconds"}
+
+
+def canonical_market_settings(settings):
+    canonical = {}
+    for name, value in (settings or {}).items():
+        canonical[LEGACY_MARKET_SETTING_NAMES.get(name, name)] = value
+    return canonical
 
 
 def entry_to_row(entry):
@@ -128,7 +143,7 @@ def write_csv(entries, path):
 
 
 def write_json_config(entries, path):
-    config = {"defaults": dict(DEFAULT_CONFIG_DEFAULTS),
+    config = {"defaults": dict(DEFAULT_MARKET_SETTINGS),
               "markets": [{key: value for key, value in entry.items()
                            if key != "_evidence"} for entry in entries]}
     json.dump(config, open(path, "w"), indent=2)
@@ -175,7 +190,7 @@ def build_config(args):
             f"no usable rows in {args.csv} "
             f"({len(skipped)} skipped; clear the needs_review column on rows "
             f"you have checked, or pass --include-flagged)")
-    config = {"defaults": dict(DEFAULT_CONFIG_DEFAULTS), "markets": kept}
+    config = {"defaults": dict(DEFAULT_MARKET_SETTINGS), "markets": kept}
     json.dump(config, open(args.out, "w"), indent=2)
     print(f"wrote {len(kept)} markets to {args.out} ({len(skipped)} skipped)")
 
@@ -255,8 +270,9 @@ def propose_against(ticker, parsed, events, id_map):
     print(f"\n  top event candidates:")
     for match in event_matches[:3]:
         marker = " <-- best" if match is best_event else ""
-        print(f"    {match.sgo_event_id:20} conf={match.confidence}"
-              f"  {'/'.join(c for c in match.sgo_teams if c)}{marker}")
+        print(f"    {match.sgo_event_id:20} confidence={match.confidence}"
+              f"  {'/'.join(team for team in match.sgo_teams if team)}"
+              f"{marker}")
         for concern in match.concerns:
             print(f"        ! {concern}")
 
@@ -338,7 +354,8 @@ def _decoded_player_display(parsed):
 
 def draft_config(args):
     parsed_list = [(ticker, parse_ticker(ticker)) for ticker in args.tickers]
-    parsed_list = [(t, p) for t, p in parsed_list if p.family is not None]
+    parsed_list = [(ticker, parsed) for ticker, parsed in parsed_list
+                   if parsed.family is not None]
     leagues = sorted({p.league for _t, p in parsed_list})
     events = []
     for league in leagues:
@@ -357,9 +374,10 @@ def draft_config(args):
         write_entries(entries, args.out)
     else:
         print(json.dumps(
-            {"defaults": dict(DEFAULT_CONFIG_DEFAULTS),
-             "markets": [{k: v for k, v in e.items() if k != "_evidence"}
-                         for e in entries]}, indent=2))
+            {"defaults": dict(DEFAULT_MARKET_SETTINGS),
+             "markets": [{field: value for field, value in entry.items()
+                          if field != "_evidence"}
+                         for entry in entries]}, indent=2))
     _persist_id_map()
 
 

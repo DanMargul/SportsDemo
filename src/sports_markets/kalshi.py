@@ -136,15 +136,15 @@ class KalshiClient:
                 break
         return collected[:max_markets]
 
-    def get_orderbook(self, ticker, depth=50):
+    def get_orderbook(self, ticker, depth_levels=50):
         return self.request_json(method="GET",
                                  path=f"/markets/{ticker}/orderbook",
-                                 params={"depth": depth})
+                                 params={"depth": depth_levels})
 
-    def get_trades(self, ticker, limit=200):
+    def get_trades(self, ticker, maximum_trades=200):
         return self.request_json(
             method="GET", path="/markets/trades",
-            params={"ticker": ticker, "limit": limit}).get("trades", [])
+            params={"ticker": ticker, "limit": maximum_trades}).get("trades", [])
 
     def get_balance(self):
         return self.request_json(method="GET",
