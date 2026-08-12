@@ -1,19 +1,22 @@
 import argparse
 import asyncio
+import collections
+import json
 import logging
 import time
 
 from sports_markets import kalshi
 from sports_markets import quoting
+from sports_markets.discover import canonical_market_settings
 from sports_markets.market_data_feed import MarketDataFeed
 from sports_markets.order_manager import OrderManager
+from sports_markets.sgo_fairvalue import SgoEventPoller
 
 log = logging.getLogger("market_maker")
 
 CLOSE_BUFFER_SECONDS = 60
 FAIR_GAP_WARNING_CENTS = 15
 
-import collections
 _recent_log = collections.deque(maxlen=200)
 
 
@@ -28,180 +31,248 @@ def recent_log_lines():
     return list(_recent_log)
 
 
+class ManagedMarket:
+    def __init__(self, spec, defaults, client, dry_run):
+        merged = canonical_market_settings({**defaults, **spec})
+        self.ticker = spec["ticker"]
+        self.quote_size = int(merged.get("quote_size", 10))
+        self.max_inventory = int(merged.get("max_inventory", 50))
+        self.config = quoting.QuoteConfig(
+            risk_aversion=float(merged.get("risk_aversion_gamma", 0.3)),
+            fill_intensity_decay=float(
+                merged.get("fill_intensity_decay_k", 50.0)),
+            quote_size=self.quote_size, max_inventory=self.max_inventory)
+        self.volatility = quoting.VolatilityEWMA()
+        self.manager = OrderManager(client, self.ticker, self.max_inventory,
+                                    self.quote_size, dry_run=dry_run)
+        self.sgo_event = merged.get("sgo_event")
+        self.sgo_odd = merged.get("sgo_odd")
+        self.sgo_line = merged.get("sgo_line")
+        self.sgo_invert = bool(merged.get("sgo_invert", False))
+        self.fair_watch = None
+        self.close_timestamp = time.time() + 6 * 3600
+        self.fair_was_live = False
+        self.last_gap_warning = 0.0
+        self.past_close = False
+
+    def external_fair(self):
+        if self.fair_watch is None:
+            return None
+        live = self.fair_watch.fresh_fair()
+        if live is not None:
+            if not self.fair_was_live:
+                log.info("[%s] SGO fair live: %.1fc YES", self.ticker,
+                         live * 100)
+            self.fair_was_live = True
+            return live
+        if self.fair_was_live:
+            log.warning("[%s] SGO fair STALE (age %.0fs); quoting book-only",
+                        self.ticker, self.fair_watch.age_seconds())
+            self.fair_was_live = False
+        return None
+
+
+def load_markets(config_path, client, dry_run):
+    config = json.load(open(config_path))
+    defaults = config.get("defaults", {})
+    markets = [ManagedMarket(spec, defaults, client, dry_run)
+               for spec in config["markets"]]
+    if not markets:
+        raise SystemExit("config has no markets")
+    tickers = [market.ticker for market in markets]
+    if len(set(tickers)) != len(tickers):
+        raise SystemExit("duplicate tickers in config")
+    return markets, float(canonical_market_settings(defaults).get(
+        "sgo_refresh_seconds", 10.0))
+
+
 async def run(args):
+    if args.env:
+        kalshi.environment = args.env
+
     client = kalshi.KalshiClient()
     exchange = client.get_exchange_status()
     if not exchange.get("trading_active"):
         raise SystemExit(f"exchange not trading: {exchange}")
 
-    market = client.get_market(args.ticker)
-    close_timestamp = (kalshi.parse_iso_timestamp(market.get("close_time"))
-                       or time.time() + 6 * 3600)
-    log.info("[%s] status %s | closes %s", args.ticker,
-             market.get("status"), market.get("close_time"))
+    markets, sgo_poll = load_markets(args.config, client, not args.live)
+    market_by_ticker = {market.ticker: market for market in markets}
 
-    manager = OrderManager(client, args.ticker, args.max_inventory, args.quote_size,
-                           dry_run=not args.live)
-    if args.live:
-        manager.position = client.get_position(args.ticker)
-        log.info("[%s] starting position: %+.0f", args.ticker,
-                 manager.position)
+    for market in markets:
+        details = client.get_market(market.ticker)
+        market.close_timestamp = (
+            kalshi.parse_iso_timestamp(details.get("close_time"))
+            or market.close_timestamp)
+        log.info("[%s] status %s | closes %s | size %d max_inv %d",
+                 market.ticker, details.get("status"),
+                 details.get("close_time"), market.quote_size,
+                 market.max_inventory)
+        if args.live:
+            market.manager.position = client.get_position(market.ticker)
+            log.info("[%s] starting position: %+.0f", market.ticker,
+                     market.manager.position)
 
     if args.state_file:
-        from dashboard_state import write_state
         logging.getLogger().addHandler(_LogCapture())
-        log.info("writing dashboard state to %s (run: python dashboard.py "
+        log.info("writing dashboard state to %s (run: sports-dashboard "
                  "--state-file %s)", args.state_file, args.state_file)
 
-    fair_watch = None
-    fair_poller = None
-    if args.sgo_odd:
-        from sgo_fairvalue import EventPollerSGO
-        fair_poller = EventPollerSGO(args.sgo_event, poll_seconds=args.sgo_refresh_seconds)
-        fair_watch = fair_poller.watch(args.sgo_odd, invert=args.sgo_invert,
-                                       strike_line=args.sgo_line)
-        fair_poller.refresh()
-        log.info("[%s] SGO fair: %.1fc YES (%s, line %s) -- %s", args.ticker,
-                 fair_watch.fair_probability * 100, fair_watch.source,
-                 fair_watch.consensus_line, fair_watch.market_name)
+    pollers_by_event = {}
+    for market in markets:
+        if market.sgo_odd and market.sgo_event:
+            poller = pollers_by_event.setdefault(
+                market.sgo_event,
+                SgoEventPoller(market.sgo_event, poll_seconds=sgo_poll))
+            market.fair_watch = poller.watch(
+                market.sgo_odd, strike_line=market.sgo_line,
+                invert=market.sgo_invert)
+    for poller in pollers_by_event.values():
+        poller.refresh()
+    for market in markets:
+        watch = market.fair_watch
+        if watch and watch.fair_probability is not None:
+            log.info("[%s] SGO fair: %.1fc YES (%s, line %s) -- %s",
+                     market.ticker, watch.fair_probability * 100, watch.source,
+                     watch.consensus_line, watch.market_name)
 
-    config = quoting.QuoteConfig(risk_aversion=args.risk_aversion_gamma,
-                                 fill_intensity_decay=args.fill_intensity_decay_k,
-                                 quote_size=args.quote_size,
-                                 max_inventory=args.max_inventory)
-    volatility = quoting.VolatilityEWMA()
-    feed = MarketDataFeed([args.ticker], include_fills=args.live)
+    feed = MarketDataFeed(list(market_by_ticker), include_fills=args.live)
     feed.on_book_update.append(
         lambda book: book.mid_cents is not None
-        and volatility.update(book.mid_cents / 100.0))
-    feed.on_fill.append(
-        lambda fill: manager.apply_fill(fill)
-        if fill.get("market_ticker") in (None, args.ticker) else None)
-    feed_task = asyncio.create_task(feed.run())
-    poller_task = (asyncio.create_task(fair_poller.run())
-                   if fair_poller else None)
+        and market_by_ticker[book.ticker].volatility.update(
+            book.mid_cents / 100.0))
 
-    started_at = time.time()
-    hard_stop = (started_at + args.duration_minutes * 60
+    def route_fill(fill):
+        ticker = fill.get("market_ticker")
+        market = market_by_ticker.get(ticker)
+        if market is None:
+            log.warning("fill for unknown market: %s", ticker)
+            return
+        market.manager.apply_fill(fill)
+    feed.on_fill.append(route_fill)
+
+    tasks = [asyncio.create_task(feed.run())]
+    tasks += [asyncio.create_task(poller.run())
+              for poller in pollers_by_event.values()]
+
+    hard_stop = (time.time() + args.duration_minutes * 60
                  if args.duration_minutes else float("inf"))
-    fair_was_live = False
-    last_gap_warning = 0.0
     try:
         while time.time() < hard_stop:
             await asyncio.sleep(args.data_interval_seconds)
             now = time.time()
-            if now > close_timestamp - CLOSE_BUFFER_SECONDS:
-                log.info("[%s] close buffer reached; pulling quotes", args.ticker)
-                manager.sync_quotes(None)
+            rows = []
+            for market in markets:
+                row = step_market(market, feed, now)
+                if row is not None:
+                    rows.append(row)
+            if markets and all(market.past_close for market in markets):
+                log.info("all markets past close; stopping")
                 break
-            book = feed.books[args.ticker]
-            if not (book.has_snapshot and book.best_bid_cents is not None
-                    and book.best_ask_cents is not None):
-                continue
-            external_fair = None
-            if fair_watch is not None:
-                external_fair = fair_watch.fresh_fair()
-                if external_fair is not None and not fair_was_live:
-                    log.info("[%s] SGO fair live: %.1fc YES", args.ticker,
-                             external_fair * 100)
-                    fair_was_live = True
-                elif external_fair is None and fair_was_live:
-                    log.warning("[%s] SGO fair STALE (age %.0fs); quoting "
-                                "book-only", args.ticker,
-                                fair_watch.age_seconds())
-                    fair_was_live = False
-            if (external_fair is not None and book.mid_cents is not None
-                    and abs(external_fair * 100 - book.mid_cents)
-                    > FAIR_GAP_WARNING_CENTS
-                    and now - last_gap_warning > 30):
-                last_gap_warning = now
-                log.warning("[%s] external fair %.1fc vs book mid %sc -- "
-                            "check oddID/side mapping", args.ticker,
-                            external_fair * 100, book.mid_cents)
-            quotes = quoting.compute_quotes(
-                book, manager.position, volatility.sigma_per_sqrt_second(),
-                close_timestamp - now, config, external_fair)
-            manager.sync_quotes(quotes)
-            marked_pnl = (manager.session_cash_dollars
-                          + manager.position * book.mid_cents / 100.0)
-            log.info("[%s] book %s/%s mid %sc | inv %+.0f | pnl $%+.2f | "
-                     "quotes %s", args.ticker, book.best_bid_cents,
-                     book.best_ask_cents, book.mid_cents, manager.position,
-                     marked_pnl, quotes)
+            if rows:
+                log.info(" | ".join(
+                    f"{row['ticker'][-12:]} {row['mid_cents']}c "
+                    f"inv{row['position']:+.0f} ${row['pnl_dollars']:+.2f}"
+                    for row in rows))
             if args.state_file:
-                write_state(args.state_file, {
-                    "ticker": args.ticker, "env": kalshi.environment,
-                    "live": args.live, "published_timestamp": now,
-                    "stop_ts": close_timestamp - CLOSE_BUFFER_SECONDS,
-                    "mid_cents": book.mid_cents,
-                    "microprice_cents": book.microprice_cents,
-                    "spread_cents": book.spread_cents,
-                    "book": {"bids": sorted(book.yes_bids.items(),
-                                            key=lambda level: -level[0])[:8],
-                             "asks": sorted((100 - no_price, quantity)
-                                            for no_price, quantity
-                                            in book.no_bids.items())[:8]},
-                    "resting": {side: (list(order[1:]) if order else None)
-                                for side, order in manager.resting.items()},
-                    "position": manager.position, "pnl_dollars": marked_pnl,
-                    "fill_count": len(manager.fills),
-                    "fair_cents": (external_fair * 100
-                                   if external_fair is not None else None),
-                    "fair_age_seconds": (fair_watch.age_seconds()
-                                         if fair_watch
-                                         and fair_watch.fresh_fair() is not None
-                                         else None),
-                    "log": recent_log_lines()})
+                publish_state(args.state_file, markets, rows, hard_stop, now)
     finally:
-        manager.cancel_all()
-        if fair_poller is not None:
-            fair_poller.stop()
+        for market in markets:
+            market.manager.cancel_all()
+        for poller in pollers_by_event.values():
+            poller.stop()
         feed.stop()
-        feed_task.cancel()
-        for task in (feed_task, poller_task):
-            if task is None:
-                continue
+        for task in tasks:
             task.cancel()
+        for task in tasks:
             try:
                 await task
             except (asyncio.CancelledError, Exception):
                 pass
 
 
+def step_market(market, feed, now):
+    if now > market.close_timestamp - CLOSE_BUFFER_SECONDS:
+        if not market.past_close:
+            log.info("[%s] close buffer reached; pulling quotes",
+                     market.ticker)
+            market.manager.sync_quotes(None)
+            market.past_close = True
+        return None
+    book = feed.books[market.ticker]
+    if not (book.has_snapshot and book.best_bid_cents is not None
+            and book.best_ask_cents is not None):
+        return None
+
+    external_fair = market.external_fair()
+    if (external_fair is not None and book.mid_cents is not None
+            and abs(external_fair * 100 - book.mid_cents)
+            > FAIR_GAP_WARNING_CENTS and now - market.last_gap_warning > 30):
+        market.last_gap_warning = now
+        log.warning("[%s] external fair %.1fc vs book mid %sc -- "
+                    "check oddID/side mapping", market.ticker,
+                    external_fair * 100, book.mid_cents)
+
+    quotes = quoting.compute_quotes(
+        book, market.manager.position,
+        market.volatility.sigma_per_sqrt_second(),
+        market.close_timestamp - now, market.config, external_fair)
+    market.manager.sync_quotes(quotes)
+
+    marked_pnl = (market.manager.session_cash_dollars
+                  + market.manager.position * book.mid_cents / 100.0)
+    return {
+        "ticker": market.ticker, "mid_cents": book.mid_cents,
+        "microprice_cents": book.microprice_cents,
+        "spread_cents": book.spread_cents,
+        "book": {"bids": sorted(book.yes_bids.items(),
+                                key=lambda level: -level[0])[:6],
+                 "asks": sorted((100 - no_price, quantity)
+                                for no_price, quantity
+                                in book.no_bids.items())[:6]},
+        "resting": {side: (list(order[1:]) if order else None)
+                    for side, order in market.manager.resting.items()},
+        "position": market.manager.position, "pnl_dollars": marked_pnl,
+        "fair_cents": (external_fair * 100 if external_fair is not None
+                       else None),
+        "fair_age_seconds": (market.fair_watch.age_seconds()
+                             if market.fair_watch
+                             and market.fair_watch.fresh_fair() is not None
+                             else None),
+        "fill_count": len(market.manager.fills)}
+
+
+def publish_state(state_file, markets, rows, hard_stop, now):
+    from sports_markets.dashboard_state import write_state
+    stop_candidates = [hard_stop] + [
+        market.close_timestamp - CLOSE_BUFFER_SECONDS
+        for market in markets if not market.past_close]
+    total_pnl = sum(row["pnl_dollars"] for row in rows)
+    total_fills = sum(len(market.manager.fills) for market in markets)
+    write_state(state_file, {
+        "env": kalshi.environment, "live": any(
+            not market.manager.dry_run for market in markets),
+        "published_timestamp": now,
+        "stop_ts": min(stop_candidates),
+        "markets": rows, "total_pnl_dollars": total_pnl,
+        "market_count": len(markets), "fill_count": total_fills,
+        "log": recent_log_lines()})
+
+
 def main():
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)-7s %(message)s")
     parser = argparse.ArgumentParser(
-        description="Avellaneda-Stoikov market maker for one Kalshi market. "
-                    "Dry-run by default; --live places real post-only "
-                    "orders after a typed confirmation.")
-    parser.add_argument("ticker")
+        description="Avellaneda-Stoikov market maker for an arbitrary number "
+                    "of Kalshi markets from one JSON config. Dry-run by "
+                    "default; --live places real post-only orders after a "
+                    "typed confirmation.")
+    parser.add_argument("config", help="markets JSON (see markets.example.json)")
     parser.add_argument("--live", action="store_true")
     parser.add_argument("--duration-minutes", type=float, default=None)
     parser.add_argument("--data-interval-seconds", type=float, default=1.0)
-    parser.add_argument("--quote-size", type=int, default=10)
-    parser.add_argument("--max-inventory", type=int, default=50)
-    parser.add_argument("--risk-aversion-gamma", type=float, default=0.3)
-    parser.add_argument("--fill-intensity-decay-k", type=float, default=50.0)
-    parser.add_argument("--state-file", default=None, metavar="PATH",
-                        help="write dashboard state here each tick "
-                             "(then run dashboard.py against the same path)")
-    parser.add_argument("--sgo-event", default=None, metavar="EVENT_ID",
-                        help="SportsGameOdds eventID (see sgo_fairvalue.py)")
-    parser.add_argument("--sgo-odd", default=None, metavar="ODD_ID",
-                        help="SGO oddID whose side settles Kalshi YES")
-    parser.add_argument("--sgo-refresh-seconds", type=float, default=10.0)
-    parser.add_argument("--sgo-line", default=None, metavar="STRIKE",
-                        help="Kalshi strike; fair computed at this exact line "
-                             "via bookmaker alternate lines")
-    parser.add_argument("--sgo-invert", action="store_true",
-                        help="use 1-p (the chosen odd settles Kalshi NO)")
+    parser.add_argument("--state-file", default=None, metavar="PATH")
     parser.add_argument("--env", choices=["prod", "demo"], default=None)
     args = parser.parse_args()
-    if bool(args.sgo_odd) != bool(args.sgo_event):
-        raise SystemExit("--sgo-event and --sgo-odd must be given together")
-    if args.env:
-        kalshi.environment = args.env
     asyncio.run(run(args))
 
 
