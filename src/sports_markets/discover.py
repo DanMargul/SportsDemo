@@ -74,7 +74,7 @@ def scan(args):
         write_entries(entries, args.out)
     else:
         print(json.dumps(
-            {"defaults": dict(DEFAULT_CONFIG_DEFAULTS),
+            {"defaults": dict(DEFAULT_MARKET_SETTINGS),
              "markets": [{k: v for k, v in e.items() if k != "_evidence"}
                          for e in entries]}, indent=2))
     _persist_id_map()
@@ -88,8 +88,22 @@ CSV_COLUMNS = ["ticker", "needs_review", "confidence", "review_notes",
                "event_teams", "event_start", "event_confidence",
                "player_code"]
 
-DEFAULT_CONFIG_DEFAULTS = {"size": 5, "max_inventory": 20, "gamma": 0.1,
-                           "k": 50, "sgo_poll": 10.0}
+DEFAULT_MARKET_SETTINGS = {"quote_size": 5, "max_inventory": 20,
+                           "risk_aversion_gamma": 0.1,
+                           "fill_intensity_decay_k": 50,
+                           "sgo_refresh_seconds": 10.0}
+
+LEGACY_MARKET_SETTING_NAMES = {"size": "quote_size",
+                               "gamma": "risk_aversion_gamma",
+                               "k": "fill_intensity_decay_k",
+                               "sgo_poll": "sgo_refresh_seconds"}
+
+
+def canonical_market_settings(settings):
+    canonical = {}
+    for name, value in (settings or {}).items():
+        canonical[LEGACY_MARKET_SETTING_NAMES.get(name, name)] = value
+    return canonical
 
 
 def entry_to_row(entry):
@@ -129,7 +143,7 @@ def write_csv(entries, path):
 
 
 def write_json_config(entries, path):
-    config = {"defaults": dict(DEFAULT_CONFIG_DEFAULTS),
+    config = {"defaults": dict(DEFAULT_MARKET_SETTINGS),
               "markets": [{key: value for key, value in entry.items()
                            if key != "_evidence"} for entry in entries]}
     json.dump(config, open(path, "w"), indent=2)
@@ -155,7 +169,7 @@ def build_config(args):
 
 
 def _record_entries(entries):
-    import discovery_store
+    from sports_markets import discovery_store
     store = discovery_store.open_store()
     try:
         store.record_all(entries)
@@ -167,7 +181,7 @@ def _record_entries(entries):
 
 
 def build_config_from_database(args):
-    import discovery_store
+    from sports_markets import discovery_store
     store = discovery_store.open_store()
     try:
         entries = store.approved_entries()
@@ -176,14 +190,14 @@ def build_config_from_database(args):
     if not entries:
         raise SystemExit(
             "no approved mappings; review the draft and run "
-            "'discover.py approve <csv>' or approve rows by hand")
-    config = {"defaults": dict(DEFAULT_CONFIG_DEFAULTS), "markets": entries}
+            "'sports-discover approve <csv>' or approve rows by hand")
+    config = {"defaults": dict(DEFAULT_MARKET_SETTINGS), "markets": entries}
     json.dump(config, open(args.out, "w"), indent=2)
     print(f"wrote {len(entries)} approved markets to {args.out}")
 
 
 def approve_from_csv(args):
-    import discovery_store
+    from sports_markets import discovery_store
     store = discovery_store.open_store()
     try:
         with open(args.csv) as handle:
@@ -392,7 +406,7 @@ def draft_config(args):
         write_entries(entries, args.out)
     else:
         print(json.dumps(
-            {"defaults": dict(DEFAULT_CONFIG_DEFAULTS),
+            {"defaults": dict(DEFAULT_MARKET_SETTINGS),
              "markets": [{k: v for k, v in e.items() if k != "_evidence"}
                          for e in entries]}, indent=2))
     _persist_id_map()
@@ -444,10 +458,9 @@ def main():
     propose_parser.set_defaults(func=lambda a: propose(a))
 
     build_parser = commands.add_parser(
-        "build", help="turn a reviewed CSV into a runnable markets.json")
+        "build",
+        help="write a runnable markets.json from approved mappings")
     build_parser.add_argument("--out", default="markets.json")
-    build_parser.add_argument("--include-flagged", action="store_true",
-                              help="include rows still marked needs_review")
     build_parser.set_defaults(func=build_config)
 
     approve_parser = commands.add_parser(

@@ -1,0 +1,15 @@
+{
+  "defaults": {"size": 5, "max_inventory": 20, "gamma": 0.1, "k": 50,
+               "sgo_poll": 10.0},
+  "markets": [
+    {"ticker": "KXMLBTOTAL-26JUL191920LADNYY-9",
+     "sgo_event": "3Eu6Zk2YLEOd3JV9Ks45",
+     "sgo_odd": "points-all-game-ou-over", "sgo_line": 8.5},
+    {"ticker": "KXMLBTOTAL-26JUL191920LADNYY-8",
+     "sgo_event": "3Eu6Zk2YLEOd3JV9Ks45",
+     "sgo_odd": "points-all-game-ou-over", "sgo_line": 7.5},
+    {"ticker": "KXMLBGAME-26JUL191920LADNYY-NYY",
+     "sgo_event": "3Eu6Zk2YLEOd3JV9Ks45",
+     "sgo_odd": "points-home-game-ml-home", "size": 3}
+  ]
+}

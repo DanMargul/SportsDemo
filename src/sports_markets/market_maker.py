@@ -1,18 +1,16 @@
 import argparse
 import asyncio
+import collections
 import json
 import logging
 import time
 
-from sports_markets import kalshi
-from sports_markets import quoting
-from sports_markets.market_data_feed import MarketDataFeed
-from sports_markets.order_manager import OrderManager
 from sports_markets import game_clock
 from sports_markets import kalshi
 from sports_markets import market_catalog
 from sports_markets import quoting
 from sports_markets import recorder as recorder_module
+from sports_markets.discover import canonical_market_settings
 from sports_markets.market_data_feed import MarketDataFeed
 from sports_markets.order_manager import OrderManager
 
@@ -23,7 +21,6 @@ CLOSE_BUFFER_SECONDS = 60
 FAIR_GAP_WARNING_CENTS = 15
 RECORDER_DRAIN_SECONDS = 5.0
 
-import collections
 _recent_log = collections.deque(maxlen=200)
 
 
@@ -40,17 +37,18 @@ def recent_log_lines():
 
 class ManagedMarket:
     def __init__(self, spec, defaults, client, dry_run, observer=None):
-        merged = {**defaults, **spec}
+        merged = canonical_market_settings({**defaults, **spec})
         self.ticker = spec["ticker"]
-        self.size = int(merged.get("size", 10))
+        self.quote_size = int(merged.get("quote_size", 10))
         self.max_inventory = int(merged.get("max_inventory", 50))
         self.config = quoting.QuoteConfig(
-            risk_aversion=float(merged.get("gamma", 0.3)),
-            fill_intensity_decay=float(merged.get("k", 50.0)),
-            quote_size=self.size, max_inventory=self.max_inventory)
+            risk_aversion=float(merged.get("risk_aversion_gamma", 0.3)),
+            fill_intensity_decay=float(
+                merged.get("fill_intensity_decay_k", 50.0)),
+            quote_size=self.quote_size, max_inventory=self.max_inventory)
         self.volatility = quoting.VolatilityEWMA()
         self.manager = OrderManager(client, self.ticker, self.max_inventory,
-                                    self.size, dry_run=dry_run,
+                                    self.quote_size, dry_run=dry_run,
                                     observer=observer)
         self.sgo_event = merged.get("sgo_event")
         self.sgo_odd = merged.get("sgo_odd")
@@ -58,7 +56,9 @@ class ManagedMarket:
         self.sgo_invert = bool(merged.get("sgo_invert", False))
         self.fair_watch = None
         self.close_timestamp = time.time() + 6 * 3600
-        self.horizon = None
+        self.pace_profile = None
+        self.league = None
+        self.game_start_timestamp = None
         self.fair_was_live = False
         self.last_gap_warning = 0.0
         self.past_close = False
@@ -86,36 +86,52 @@ class ManagedMarket:
                      "to Kalshi close_time", self.ticker)
             return
         try:
-            self.horizon = game_clock.GameClockHorizon(parsed.family.league,
-                                                       game_start)
+            self.pace_profile = game_clock.profile_for(parsed.family.league)
         except KeyError:
             log.info("[%s] no pace profile for league %s; horizon falls "
                      "back to Kalshi close_time", self.ticker,
                      parsed.family.league)
             return
+        self.league = parsed.family.league
+        self.game_start_timestamp = game_start
         now = time.time()
-        estimate = self.horizon.estimate(now)
-        elapsed_minutes = self.horizon.elapsed_seconds(now) / 60
+        elapsed_minutes = self.elapsed_game_seconds(now) / 60
+        estimate = self.game_seconds_remaining(now)
         log.info("[%s] game clock: %s, started %s (%s), %.0f min elapsed, "
                  "~%.0f min to game end; Kalshi close is %.0f min out",
-                 self.ticker, estimate.league,
+                 self.ticker, self.league,
                  time.strftime("%H:%M", time.localtime(game_start)),
-                 start_source, elapsed_minutes, estimate.seconds / 60,
+                 start_source, elapsed_minutes, estimate / 60,
                  (self.close_timestamp - now) / 60)
-        if (self.horizon.elapsed_seconds(now)
-                > self.horizon.profile.nominal_real_seconds):
+        if self.elapsed_game_seconds(now) > \
+                self.pace_profile.nominal_real_seconds:
             log.warning("[%s] ticker start time implies the game should "
                         "already be over (%.0f min elapsed vs %.0f min "
                         "typical) -- if it is delayed, pass --game-start "
                         "with the real first pitch", self.ticker,
                         elapsed_minutes,
-                        self.horizon.profile.nominal_real_seconds / 60)
+                        self.pace_profile.nominal_real_seconds / 60)
+
+    def elapsed_game_seconds(self, now):
+        return max(0.0, now - self.game_start_timestamp)
+
+    def units_remaining(self, now):
+        nominal = self.pace_profile.nominal_real_seconds
+        played_fraction = min(1.0, self.elapsed_game_seconds(now) / nominal)
+        return self.pace_profile.regulation_units * (1.0 - played_fraction)
+
+    def game_seconds_remaining(self, now):
+        elapsed = self.elapsed_game_seconds(now)
+        estimate = game_clock.estimate_remaining(
+            self.league, self.units_remaining(now),
+            elapsed_real_seconds=elapsed if elapsed > 0 else None)
+        return max(0.0, estimate.seconds)
 
     def seconds_to_close(self, now):
         remaining = self.close_timestamp - now
-        if self.horizon is None:
+        if self.pace_profile is None:
             return remaining
-        return min(remaining, self.horizon.seconds_remaining(now))
+        return min(remaining, self.game_seconds_remaining(now))
 
     def external_fair(self):
         if self.fair_watch is None:
@@ -135,14 +151,17 @@ class ManagedMarket:
 
 
 def single_market_spec(args):
-    spec = {"ticker": args.ticker, "size": args.quote_size,
-            "max_inventory": args.max_inventory, "gamma": args.risk_aversion_gamma,
-            "k": args.fill_intensity_decay_k}
+    spec = {"ticker": args.ticker,
+            "quote_size": args.quote_size,
+            "max_inventory": args.max_inventory,
+            "risk_aversion_gamma": args.risk_aversion_gamma,
+            "fill_intensity_decay_k": args.fill_intensity_decay_k}
     for key in ("sgo_event", "sgo_odd", "sgo_line", "sgo_invert"):
         value = getattr(args, key, None)
         if value:
             spec[key] = value
-    return {"defaults": {"sgo_refresh (s)": args.sgo_refresh_seconds}, "markets": [spec]}
+    return {"defaults": {"sgo_refresh_seconds": args.sgo_refresh_seconds},
+            "markets": [spec]}
 
 
 def load_markets(source, client, dry_run, observer=None):
@@ -155,7 +174,7 @@ def load_markets(source, client, dry_run, observer=None):
     else:
         config = single_market_spec(source)
         fallback_poll = source.sgo_refresh_seconds
-    defaults = config.get("defaults", {})
+    defaults = canonical_market_settings(config.get("defaults", {}))
     markets = [ManagedMarket(spec, defaults, client, dry_run,
                              observer=observer)
                for spec in config["markets"]]
@@ -164,7 +183,8 @@ def load_markets(source, client, dry_run, observer=None):
     tickers = [market.ticker for market in markets]
     if len(set(tickers)) != len(tickers):
         raise SystemExit("duplicate tickers in config")
-    return markets, float(defaults.get("sgo_poll", fallback_poll)), config
+    return markets, float(
+        defaults.get("sgo_refresh_seconds", fallback_poll)), config
 
 
 async def run(args):
@@ -199,7 +219,7 @@ async def run(args):
             or market.close_timestamp)
         log.info("[%s] status %s | closes %s | size %d max_inv %d",
                  market.ticker, details.get("status"),
-                 details.get("close_time"), market.size, market.max_inventory)
+                 details.get("close_time"), market.quote_size, market.max_inventory)
         market.build_horizon(not args.no_game_clock,
                              args.game_start if len(markets) == 1 else None)
         recorder.track_market(market.ticker,
@@ -366,7 +386,7 @@ def publish_state(state_file, markets, rows, hard_stop, now):
     write_state(state_file, {
         "env": kalshi.environment, "live": any(
             not market.manager.dry_run for market in markets),
-        "ts": now, "stop_ts": min(stop_candidates),
+        "published_timestamp": now, "stop_ts": min(stop_candidates),
         "markets": rows, "total_pnl_dollars": total_pnl,
         "market_count": len(markets), "fill_count": total_fills,
         "log": recent_log_lines()})
@@ -387,7 +407,7 @@ def main():
     parser.add_argument("--live", action="store_true")
     parser.add_argument("--duration-minutes", type=float, default=None)
     parser.add_argument("--data-interval-seconds", type=float, default=1.0)
-    parser.add_argument("--quote_size", type=int, default=10)
+    parser.add_argument("--quote-size", type=int, default=10)
     parser.add_argument("--max-inventory", type=int, default=50)
     parser.add_argument("--risk-aversion-gamma", type=float, default=0.3)
     parser.add_argument("--fill-intensity-decay-k", type=float, default=50.0)
