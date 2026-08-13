@@ -65,32 +65,12 @@ class MarketFamily:
 
 
 MARKET_FAMILIES = [
-    MarketFamily(kalshi_prefix="KXMLBTOTAL",
-                 league="mlb",
-                 description="game total runs over/under",
-                 sgo_stat_id="points",
-                 sgo_bet_type="ou",
-                 sgo_stat_entity="all",
-                 kalshi_yes_side="over",
-                 has_strike=True,
-                 has_player=False),
-    MarketFamily(kalshi_prefix="KXMLBGAME",
-                 league="mlb",
-                 description="game moneyline (which team wins)",
-                 sgo_stat_id="points",
-                 sgo_bet_type="ml",
-                 sgo_stat_entity="home",
-                 kalshi_yes_side="home",
-                 has_strike=False,
-                 has_player=False),
-    MarketFamily(kalshi_prefix="KXMLBHRR",
-                 league="mlb",
-                 description="player hits+runs+RBIs over/under",
-                 sgo_stat_id="batting_hits+runs+rbi",
-                 sgo_bet_type="ou",
-                 sgo_stat_entity="player",
-                 kalshi_yes_side="over",
-                 has_strike=True,
+    MarketFamily("KXMLBTOTAL", "mlb", "game total runs over/under",
+                 "points", "ou", "all", "over", True, has_player=False),
+    MarketFamily("KXMLBGAME", "mlb", "game moneyline (which team wins)",
+                 "points", "ml", "home", "home", False, has_player=False),
+    MarketFamily("KXMLBHRR", "mlb", "player hits+runs+RBIs over/under",
+                 "batting_hits+runs+rbi", "ou", "player", "over", True,
                  has_player=True),
 ]
 
@@ -144,10 +124,6 @@ def _ticker_code_map(league: str):
             if alias.isalpha() and 2 <= len(alias) <= 3:
                 code_map[alias.upper()] = canonical
     return code_map
-
-
-def ticker_team_codes(league: str):
-    return _ticker_code_map(league)
 
 
 def ticker_codes_for(league: str, canonical_codes) -> set:
@@ -234,5 +210,25 @@ def parse_iso_date(value):
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed
+    except ValueError:
+        return None
+
+
+KALSHI_TICKER_TIMEZONE = "America/New_York"
+
+
+def ticker_start_timestamp(parsed):
+    if not parsed.date or not parsed.time_hhmm or len(parsed.time_hhmm) != 4:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        zone = ZoneInfo(KALSHI_TICKER_TIMEZONE)
+    except Exception:
+        zone = timezone.utc
+    try:
+        year, month, day = (int(part) for part in parsed.date.split("-"))
+        hour, minute = int(parsed.time_hhmm[:2]), int(parsed.time_hhmm[2:])
+        return datetime(year, month, day, hour, minute,
+                        tzinfo=zone).timestamp()
     except ValueError:
         return None

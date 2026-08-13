@@ -25,6 +25,7 @@ sports-dashboard = "sports_markets.dashboard:main"
 sports-analyze = "sports_markets.analyze:main"
 sports-devig = "sports_markets.devig:main"
 sports-sgo = "sports_markets.sgo_fairvalue:main"
+sports-db = "sports_markets.db:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

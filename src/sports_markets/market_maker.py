@@ -5,34 +5,38 @@ import json
 import logging
 import time
 
+from sports_markets import game_clock
 from sports_markets import kalshi
+from sports_markets import market_catalog
 from sports_markets import quoting
+from sports_markets import recorder as recorder_module
 from sports_markets.discover import canonical_market_settings
 from sports_markets.market_data_feed import MarketDataFeed
 from sports_markets.order_manager import OrderManager
-from sports_markets.sgo_fairvalue import SgoEventPoller
 
 log = logging.getLogger("market_maker")
+tick_log = logging.getLogger("market_maker.tick")
 
 CLOSE_BUFFER_SECONDS = 60
 FAIR_GAP_WARNING_CENTS = 15
+RECORDER_DRAIN_SECONDS = 5.0
 
 _recent_log = collections.deque(maxlen=200)
 
 
 class _LogCapture(logging.Handler):
     def emit(self, record):
-        _recent_log.append(
-            time.strftime("%H:%M:%S", time.localtime(record.created))
-            + f"  {record.levelname:<7} {record.getMessage()}")
+        if record.name == "market_maker.tick":
+            return
+        _recent_log.append(self.format(record))
 
 
 def recent_log_lines():
-    return list(_recent_log)
+    return list(_recent_log)[-40:]
 
 
 class ManagedMarket:
-    def __init__(self, spec, defaults, client, dry_run):
+    def __init__(self, spec, defaults, client, dry_run, observer=None):
         merged = canonical_market_settings({**defaults, **spec})
         self.ticker = spec["ticker"]
         self.quote_size = int(merged.get("quote_size", 10))
@@ -44,16 +48,90 @@ class ManagedMarket:
             quote_size=self.quote_size, max_inventory=self.max_inventory)
         self.volatility = quoting.VolatilityEWMA()
         self.manager = OrderManager(client, self.ticker, self.max_inventory,
-                                    self.quote_size, dry_run=dry_run)
+                                    self.quote_size, dry_run=dry_run,
+                                    observer=observer)
         self.sgo_event = merged.get("sgo_event")
         self.sgo_odd = merged.get("sgo_odd")
         self.sgo_line = merged.get("sgo_line")
         self.sgo_invert = bool(merged.get("sgo_invert", False))
         self.fair_watch = None
         self.close_timestamp = time.time() + 6 * 3600
+        self.pace_profile = None
+        self.league = None
+        self.game_start_timestamp = None
         self.fair_was_live = False
         self.last_gap_warning = 0.0
         self.past_close = False
+
+    def build_horizon(self, use_game_clock, game_start_override=None):
+        if not use_game_clock:
+            return
+        parsed = market_catalog.parse_ticker(self.ticker)
+        if parsed.family is None:
+            log.info("[%s] no known market family; horizon falls back to "
+                     "Kalshi close_time", self.ticker)
+            return
+        if game_start_override:
+            game_start = kalshi.parse_iso_timestamp(game_start_override)
+            if not game_start:
+                raise SystemExit(
+                    f"could not parse --game-start {game_start_override!r}; "
+                    f"expected ISO8601 like 2026-07-19T23:20:00Z")
+            start_source = "--game-start override"
+        else:
+            game_start = market_catalog.ticker_start_timestamp(parsed)
+            start_source = "derived from ticker"
+        if not game_start:
+            log.info("[%s] no start time in the ticker; horizon falls back "
+                     "to Kalshi close_time", self.ticker)
+            return
+        try:
+            self.pace_profile = game_clock.profile_for(parsed.family.league)
+        except KeyError:
+            log.info("[%s] no pace profile for league %s; horizon falls "
+                     "back to Kalshi close_time", self.ticker,
+                     parsed.family.league)
+            return
+        self.league = parsed.family.league
+        self.game_start_timestamp = game_start
+        now = time.time()
+        elapsed_minutes = self.elapsed_game_seconds(now) / 60
+        estimate = self.game_seconds_remaining(now)
+        log.info("[%s] game clock: %s, started %s (%s), %.0f min elapsed, "
+                 "~%.0f min to game end; Kalshi close is %.0f min out",
+                 self.ticker, self.league,
+                 time.strftime("%H:%M", time.localtime(game_start)),
+                 start_source, elapsed_minutes, estimate / 60,
+                 (self.close_timestamp - now) / 60)
+        if self.elapsed_game_seconds(now) > \
+                self.pace_profile.nominal_real_seconds:
+            log.warning("[%s] ticker start time implies the game should "
+                        "already be over (%.0f min elapsed vs %.0f min "
+                        "typical) -- if it is delayed, pass --game-start "
+                        "with the real first pitch", self.ticker,
+                        elapsed_minutes,
+                        self.pace_profile.nominal_real_seconds / 60)
+
+    def elapsed_game_seconds(self, now):
+        return max(0.0, now - self.game_start_timestamp)
+
+    def units_remaining(self, now):
+        nominal = self.pace_profile.nominal_real_seconds
+        played_fraction = min(1.0, self.elapsed_game_seconds(now) / nominal)
+        return self.pace_profile.regulation_units * (1.0 - played_fraction)
+
+    def game_seconds_remaining(self, now):
+        elapsed = self.elapsed_game_seconds(now)
+        estimate = game_clock.estimate_remaining(
+            self.league, self.units_remaining(now),
+            elapsed_real_seconds=elapsed if elapsed > 0 else None)
+        return max(0.0, estimate.seconds)
+
+    def seconds_to_close(self, now):
+        remaining = self.close_timestamp - now
+        if self.pace_profile is None:
+            return remaining
+        return min(remaining, self.game_seconds_remaining(now))
 
     def external_fair(self):
         if self.fair_watch is None:
@@ -72,18 +150,41 @@ class ManagedMarket:
         return None
 
 
-def load_markets(config_path, client, dry_run):
-    config = json.load(open(config_path))
-    defaults = config.get("defaults", {})
-    markets = [ManagedMarket(spec, defaults, client, dry_run)
+def single_market_spec(args):
+    spec = {"ticker": args.ticker,
+            "quote_size": args.quote_size,
+            "max_inventory": args.max_inventory,
+            "risk_aversion_gamma": args.risk_aversion_gamma,
+            "fill_intensity_decay_k": args.fill_intensity_decay_k}
+    for key in ("sgo_event", "sgo_odd", "sgo_line", "sgo_invert"):
+        value = getattr(args, key, None)
+        if value:
+            spec[key] = value
+    return {"defaults": {"sgo_refresh_seconds": args.sgo_refresh_seconds},
+            "markets": [spec]}
+
+
+def load_markets(source, client, dry_run, observer=None):
+    if isinstance(source, str):
+        config = json.load(open(source))
+        fallback_poll = 10.0
+    elif getattr(source, "config", None):
+        config = json.load(open(source.config))
+        fallback_poll = source.sgo_refresh_seconds
+    else:
+        config = single_market_spec(source)
+        fallback_poll = source.sgo_refresh_seconds
+    defaults = canonical_market_settings(config.get("defaults", {}))
+    markets = [ManagedMarket(spec, defaults, client, dry_run,
+                             observer=observer)
                for spec in config["markets"]]
     if not markets:
         raise SystemExit("config has no markets")
     tickers = [market.ticker for market in markets]
     if len(set(tickers)) != len(tickers):
         raise SystemExit("duplicate tickers in config")
-    return markets, float(canonical_market_settings(defaults).get(
-        "sgo_refresh_seconds", 10.0))
+    return markets, float(
+        defaults.get("sgo_refresh_seconds", fallback_poll)), config
 
 
 async def run(args):
@@ -95,7 +196,20 @@ async def run(args):
     if not exchange.get("trading_active"):
         raise SystemExit(f"exchange not trading: {exchange}")
 
-    markets, sgo_poll = load_markets(args.config, client, not args.live)
+    recorder = recorder_module.Recorder(
+        environment=kalshi.environment, is_live=bool(args.live), config={})
+
+    markets, sgo_poll, resolved_config = load_markets(
+        args, client, not args.live, observer=recorder)
+    recorder.config = {"source": args.config or args.ticker,
+                       "data interval (s)": args.data_interval_seconds, **resolved_config}
+    try:
+        recorder.open_connection()
+    except Exception as error:
+        raise SystemExit(
+            f"database unreachable at startup ({error}); start PostgreSQL "
+            f"or fix DATABASE_URL before trading") from error
+    log.info("recording to session %s", recorder.session_id)
     market_by_ticker = {market.ticker: market for market in markets}
 
     for market in markets:
@@ -105,8 +219,12 @@ async def run(args):
             or market.close_timestamp)
         log.info("[%s] status %s | closes %s | size %d max_inv %d",
                  market.ticker, details.get("status"),
-                 details.get("close_time"), market.quote_size,
-                 market.max_inventory)
+                 details.get("close_time"), market.quote_size, market.max_inventory)
+        market.build_horizon(not args.no_game_clock,
+                             args.game_start if len(markets) == 1 else None)
+        recorder.track_market(market.ticker,
+                              market_catalog.parse_ticker(market.ticker),
+                              market.close_timestamp)
         if args.live:
             market.manager.position = client.get_position(market.ticker)
             log.info("[%s] starting position: %+.0f", market.ticker,
@@ -114,9 +232,10 @@ async def run(args):
 
     if args.state_file:
         logging.getLogger().addHandler(_LogCapture())
-        log.info("writing dashboard state to %s (run: sports-dashboard "
+        log.info("writing dashboard state to %s (run: python dashboard.py "
                  "--state-file %s)", args.state_file, args.state_file)
 
+    from sports_markets.sgo_fairvalue import SgoEventPoller
     pollers_by_event = {}
     for market in markets:
         if market.sgo_odd and market.sgo_event:
@@ -153,6 +272,7 @@ async def run(args):
     tasks = [asyncio.create_task(feed.run())]
     tasks += [asyncio.create_task(poller.run())
               for poller in pollers_by_event.values()]
+    recorder_task = asyncio.create_task(recorder.run())
 
     hard_stop = (time.time() + args.duration_minutes * 60
                  if args.duration_minutes else float("inf"))
@@ -162,14 +282,14 @@ async def run(args):
             now = time.time()
             rows = []
             for market in markets:
-                row = step_market(market, feed, now)
+                row = step_market(market, feed, now, recorder)
                 if row is not None:
                     rows.append(row)
             if markets and all(market.past_close for market in markets):
                 log.info("all markets past close; stopping")
                 break
             if rows:
-                log.info(" | ".join(
+                tick_log.info(" | ".join(
                     f"{row['ticker'][-12:]} {row['mid_cents']}c "
                     f"inv{row['position']:+.0f} ${row['pnl_dollars']:+.2f}"
                     for row in rows))
@@ -180,17 +300,23 @@ async def run(args):
             market.manager.cancel_all()
         for poller in pollers_by_event.values():
             poller.stop()
+        recorder.stop()
+        try:
+            await asyncio.wait_for(recorder_task,
+                                   timeout=RECORDER_DRAIN_SECONDS)
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            pass
         feed.stop()
-        for task in tasks:
+        for task in tasks + [recorder_task]:
             task.cancel()
-        for task in tasks:
             try:
                 await task
             except (asyncio.CancelledError, Exception):
                 pass
+        recorder.final_flush()
 
 
-def step_market(market, feed, now):
+def step_market(market, feed, now, recorder):
     if now > market.close_timestamp - CLOSE_BUFFER_SECONDS:
         if not market.past_close:
             log.info("[%s] close buffer reached; pulling quotes",
@@ -212,11 +338,18 @@ def step_market(market, feed, now):
                     "check oddID/side mapping", market.ticker,
                     external_fair * 100, book.mid_cents)
 
+    seconds_to_close = market.seconds_to_close(now)
+    sigma = market.volatility.sigma_per_sqrt_second()
     quotes = quoting.compute_quotes(
-        book, market.manager.position,
-        market.volatility.sigma_per_sqrt_second(),
-        market.close_timestamp - now, market.config, external_fair)
+        book, market.manager.position, sigma, seconds_to_close,
+        market.config, external_fair)
     market.manager.sync_quotes(quotes)
+
+    recorder.record_book(market.ticker, now, book)
+    recorder.record_quote(market.ticker, now, quotes,
+                          market.manager.position, sigma, seconds_to_close,
+                          external_fair)
+    recorder.record_fair_value(market.ticker, now, market.fair_watch)
 
     marked_pnl = (market.manager.session_cash_dollars
                   + market.manager.position * book.mid_cents / 100.0)
@@ -234,6 +367,8 @@ def step_market(market, feed, now):
         "position": market.manager.position, "pnl_dollars": marked_pnl,
         "fair_cents": (external_fair * 100 if external_fair is not None
                        else None),
+        "theo_cents": getattr(quotes, "blended_fair_cents", None),
+        "reservation_cents": getattr(quotes, "reservation_cents", None),
         "fair_age_seconds": (market.fair_watch.age_seconds()
                              if market.fair_watch
                              and market.fair_watch.fresh_fair() is not None
@@ -242,7 +377,7 @@ def step_market(market, feed, now):
 
 
 def publish_state(state_file, markets, rows, hard_stop, now):
-    from sports_markets.dashboard_state import write_state
+    from dashboard_state import write_state
     stop_candidates = [hard_stop] + [
         market.close_timestamp - CLOSE_BUFFER_SECONDS
         for market in markets if not market.past_close]
@@ -251,8 +386,7 @@ def publish_state(state_file, markets, rows, hard_stop, now):
     write_state(state_file, {
         "env": kalshi.environment, "live": any(
             not market.manager.dry_run for market in markets),
-        "published_timestamp": now,
-        "stop_ts": min(stop_candidates),
+        "published_timestamp": now, "stop_ts": min(stop_candidates),
         "markets": rows, "total_pnl_dollars": total_pnl,
         "market_count": len(markets), "fill_count": total_fills,
         "log": recent_log_lines()})
@@ -262,15 +396,34 @@ def main():
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)-7s %(message)s")
     parser = argparse.ArgumentParser(
-        description="Avellaneda-Stoikov market maker for an arbitrary number "
-                    "of Kalshi markets from one JSON config. Dry-run by "
-                    "default; --live places real post-only orders after a "
-                    "typed confirmation.")
-    parser.add_argument("config", help="markets JSON (see markets.example.json)")
+        description="Avellaneda-Stoikov market maker for one ticker or a "
+                    "JSON config of markets. Dry-run by default; --live "
+                    "places real post-only orders after a typed "
+                    "confirmation.")
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument("ticker", nargs="?", default=None)
+    target.add_argument("--config", metavar="PATH",
+                        help="markets JSON (see markets.example.json)")
     parser.add_argument("--live", action="store_true")
     parser.add_argument("--duration-minutes", type=float, default=None)
     parser.add_argument("--data-interval-seconds", type=float, default=1.0)
+    parser.add_argument("--quote-size", type=int, default=10)
+    parser.add_argument("--max-inventory", type=int, default=50)
+    parser.add_argument("--risk-aversion-gamma", type=float, default=0.3)
+    parser.add_argument("--fill-intensity-decay-k", type=float, default=50.0)
     parser.add_argument("--state-file", default=None, metavar="PATH")
+    parser.add_argument("--sgo-event", default=None)
+    parser.add_argument("--sgo-odd", default=None)
+    parser.add_argument("--sgo-refresh-seconds", type=float, default=10.0)
+    parser.add_argument("--sgo-line", default=None, metavar="STRIKE")
+    parser.add_argument("--sgo-invert", action="store_true")
+    parser.add_argument("--no-game-clock", action="store_true",
+                        help="use Kalshi close_time as the A-S horizon "
+                             "instead of the game-pace clock")
+    parser.add_argument("--game-start", default=None, metavar="ISO8601",
+                        help="override the game start time derived from the "
+                             "ticker (use when a game is delayed; single "
+                             "market only)")
     parser.add_argument("--env", choices=["prod", "demo"], default=None)
     args = parser.parse_args()
     asyncio.run(run(args))
